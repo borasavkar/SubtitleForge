@@ -1,0 +1,27 @@
+# Environments
+.env
+.venv
+.venv*
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Build and dist
+build/
+dist/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDEs
+.idea/
+.vscode/
+.claude/
+
+# OS generated files
+Thumbs.db
+.DS_Store
