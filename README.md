@@ -1,6 +1,6 @@
-# WhisperX Subtitle Studio v3
+# SubtitleForge
 
-Welcome to **WhisperX Subtitle Studio v3**, an AI-powered desktop application designed to generate, align, and translate subtitles effortlessly. Running entirely on your CPU, it utilizes the powerful WhisperX model to deliver high-quality transcription and precise word-level alignments.
+Welcome to **SubtitleForge**, an AI-powered desktop application designed to generate, align, and translate subtitles effortlessly. Running entirely on your CPU, it utilizes the powerful WhisperX model to deliver high-quality transcription and precise word-level alignments.
 
 ## Features
 
@@ -13,9 +13,9 @@ Welcome to **WhisperX Subtitle Studio v3**, an AI-powered desktop application de
 
 ## Installation & Usage
 
-You can download the pre-compiled, ready-to-use version from the [Releases](https://github.com/borasavkar/WhisperX-App/releases) page. 
+You can download the pre-compiled, ready-to-use version from the [Releases](https://github.com/borasavkar/SubtitleForge/releases) page. 
 
-1. Download `WhisperX_Release.zip` from the latest release.
+1. Download `SubtitleForge_Release.zip` from the latest release.
 2. Extract the archive to your desired location.
 3. Run the executable inside the extracted folder to start the application. 
 

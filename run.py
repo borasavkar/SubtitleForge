@@ -112,7 +112,7 @@ class KullaniciIptali(Exception):
 class WhisperApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Bora Şavkar - AI Altyazı Stüdyosu v3 (WhisperX / CPU)")
+        self.root.title("SubtitleForge")
         # Pencere yeniden boyutlandırılabilir: alt sınır, ayar kutularının hepsinin
         # sığdığı yükseklik (bunun altında terminal alanı ezilir).
         self.root.minsize(700, 860)
