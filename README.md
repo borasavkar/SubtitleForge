@@ -36,6 +36,19 @@ This project uses PyInstaller. You can build the standalone executable yourself 
 pyinstaller run.spec
 ```
 
+### Versioning
+
+The version number lives in a single place: `surum.py`. Bump `SURUM` there and everything else follows.
+
+Every build stamps itself so you can always tell whether the executable you are holding is current:
+
+- **Window title** — `SubtitleForge v1.1.0`
+- **First line of the log panel** — `SubtitleForge v1.1.0 · 2026-08-27 20:47 derlemesi · b8472c8` (build timestamp and the git commit it was built from). Running from source shows `kaynaktan çalışıyor` instead.
+- **Windows file properties** — right-click `run.exe` → Properties → Details shows File version and Product version.
+- **Crash reports** — `HATA_RAPORU.txt` starts with the version line, so a shared report identifies its build.
+
+The build timestamp and commit are written into a generated `_derleme_bilgisi.py` by `run.spec` at build time; it is git-ignored and never edited by hand.
+
 ## Contributing
 
 Feel free to open issues or submit pull requests. Any contributions that improve the accuracy, speed, or user experience are highly appreciated.

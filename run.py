@@ -17,6 +17,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from deep_translator import GoogleTranslator
 
+from surum import SURUM
+
+# Derleme bilgisi exe üretilirken run.spec tarafından yazılıyor. Kaynaktan
+# çalıştırıldığında bu modül yok; o zaman "kaynaktan" olduğunu söylüyoruz.
+# Amaç: elindeki exe'nin güncel olup olmadığını sürüm numarasına ek olarak
+# derleme tarihinden ve commit'ten de anlayabilmek.
+try:
+    from _derleme_bilgisi import DERLEME_TARIHI, DERLEME_COMMIT
+except Exception:
+    DERLEME_TARIHI, DERLEME_COMMIT = "", ""
+
 # Windows konsolu varsayılan olarak cp1254 kullanıyor ve log satırlarındaki emojiler
 # UnicodeEncodeError ile çöküyordu (depodaki eski HATA_RAPORU.txt tam olarak buydu).
 # Hata yakalayıcının kendisi de print() kullandığı için çökme raporu bile basılamıyordu.
@@ -59,6 +70,20 @@ def _tasinabilir_model_klasoru():
 
 _MODEL_KLASORU = _tasinabilir_model_klasoru()
 
+
+def surum_metni(kisa=False):
+    """Kullanıcıya gösterilecek sürüm satırı.
+
+    kisa=True  -> "v1.1.0"                                  (pencere başlığı)
+    kisa=False -> "v1.1.0 · 2026-08-27 derlemesi · a2d324a"  (log satırı)
+    """
+    if kisa or not DERLEME_TARIHI:
+        return f"v{SURUM}" if kisa else f"v{SURUM} · kaynaktan çalışıyor"
+    parcalar = [f"v{SURUM}", f"{DERLEME_TARIHI} derlemesi"]
+    if DERLEME_COMMIT:
+        parcalar.append(DERLEME_COMMIT)
+    return " · ".join(parcalar)
+
 # Pencereli (pythonw / console=False) çalışırken ffmpeg'in siyah konsol
 # penceresi açmasını engelleyen bayrak.
 _KONSOLSUZ = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
@@ -68,7 +93,9 @@ _KONSOLSUZ = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 
 def hata_yakalayici(exctype, value, tb):
     hata_mesaji = "".join(traceback.format_exception(exctype, value, tb))
     with open(os.path.join(_APP_DIR, "HATA_RAPORU.txt"), "w", encoding="utf-8") as f:
-        f.write(hata_mesaji)
+        # Sürüm satırı raporun başında: paylaşılan bir rapordan hangi yapıya ait
+        # olduğu anlaşılmıyordu.
+        f.write(f"SubtitleForge {surum_metni()}\n\n{hata_mesaji}")
     # Pencereli (console=False) çalışırken stdout/stdin bulunmayabiliyor;
     # rapor zaten dosyaya yazıldı, ekrana basmak başarısız olursa sessiz geçiyoruz.
     try:
@@ -348,7 +375,7 @@ class GoogleCevirici:
 class WhisperApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("SubtitleForge")
+        self.root.title(f"SubtitleForge {surum_metni(kisa=True)}")
         # Pencere yeniden boyutlandırılabilir: alt sınır, ayar kutularının hepsinin
         # sığdığı yükseklik (bunun altında terminal alanı ezilir).
         self.root.minsize(700, 890)
@@ -604,6 +631,10 @@ class WhisperApp:
         # ile sessizce oluyor ve etiket "araniyor..." kaliyordu.
         self.root.after(200, self._ffmpeg_durumu_guncelle)
 
+        # Elindeki sürümün ne olduğu, log'un ilk satırında görünsün: HATA_RAPORU
+        # paylaşıldığında hangi yapıya ait olduğu da böyle anlaşılıyor.
+        self.log(f"🎬 SubtitleForge {surum_metni()}")
+
         if _MODEL_KLASORU:
             self.log(f"📦 Modeller program klasöründen okunuyor: {os.path.basename(_MODEL_KLASORU)}")
 
@@ -614,7 +645,7 @@ class WhisperApp:
     def tk_hata_yakalayici(self, exc, val, tb):
         hata_mesaji = "".join(traceback.format_exception(exc, val, tb))
         with open(os.path.join(_APP_DIR, "HATA_RAPORU_UI.txt"), "w", encoding="utf-8") as f:
-            f.write(hata_mesaji)
+            f.write(f"SubtitleForge {surum_metni()}\n\n{hata_mesaji}")
         self.log("❌ ARAYÜZ HATASI: HATA_RAPORU_UI.txt dosyasına bakınız.")
 
     def resource_path(self, relative_path):
@@ -1786,7 +1817,7 @@ class WhisperApp:
         except Exception as e:
             self.log(f"❌ KRİTİK HATA:\n{str(e)}")
             with open(os.path.join(_APP_DIR, "HATA_RAPORU.txt"), "w", encoding="utf-8") as f:
-                f.write(traceback.format_exc())
+                f.write(f"SubtitleForge {surum_metni()}\n\n{traceback.format_exc()}")
             self.log("   Ayrıntılar HATA_RAPORU.txt dosyasına yazıldı.")
             self.ilerleme(0, "Hata oluştu.")
 
