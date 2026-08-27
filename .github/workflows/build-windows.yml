@@ -1,0 +1,93 @@
+name: Windows taşınabilir exe
+
+# Her güncellemeden sonra exe'yi Windows runner'ında otomatik üretir.
+# Derleme yerelde de yapılabilir (pyinstaller run.spec) ama o zaman her
+# değişiklikten sonra elle derlemek gerekiyor; buradaki iş akışı zip'i hazır
+# veriyor.
+#
+# Çıktı iki yerde:
+#   * Her derlemede -> Actions > ilgili çalıştırma > Artifacts (90 gün durur)
+#   * v* etiketi atılınca -> Releases sayfasına da eklenir (kalıcı)
+
+on:
+  push:
+    branches: [master, 'claude/**']
+    tags: ['v*']
+  workflow_dispatch:          # Actions sekmesinden elle de tetiklenebilir
+
+permissions:
+  contents: write             # yalnızca etiket derlemesinde sürüm oluşturmak için
+
+jobs:
+  derle:
+    runs-on: windows-latest
+    timeout-minutes: 120      # torch + whisperx kurulumu uzun sürüyor
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # run.spec derleme damgası için commit kodunu git'ten okuyor
+
+      - uses: actions/setup-python@v5
+        with:
+          # Projenin doğrulandığı sürüm: start.bat .venv310'u işaret ediyor ve
+          # requirements.txt'teki tomli/exceptiongroup 3.10 arka portları.
+          python-version: '3.10'
+          cache: pip
+
+      - name: Sürüm numarasını oku
+        id: surum
+        shell: bash
+        run: echo "surum=$(python -c 'from surum import SURUM; print(SURUM)')" >> "$GITHUB_OUTPUT"
+
+      - name: Bağımlılıkları kur
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install "pyinstaller>=6.3,<7"
+
+      - name: Testleri çalıştır
+        # Ağa çıkmıyor; bozuk bir çeviri katmanını exe'ye kadar taşımamak için.
+        run: python tests/test_ceviri.py
+
+      - name: Exe'yi derle
+        run: pyinstaller --noconfirm run.spec
+
+      - name: Sürümün gerçekten gömüldüğünü doğrula
+        shell: pwsh
+        run: |
+          $s = (Get-Item dist/run/run.exe).VersionInfo
+          Write-Host "FileVersion    : $($s.FileVersion)"
+          Write-Host "ProductVersion : $($s.ProductVersion)"
+          if ($s.FileVersion -notlike "${{ steps.surum.outputs.surum }}*") {
+            throw "Exe'ye sürüm kaydı gömülmemiş! Beklenen ${{ steps.surum.outputs.surum }}, gelen '$($s.FileVersion)'"
+          }
+
+      - name: Taşınabilir zip'i paketle
+        shell: pwsh
+        # 7z runner'da hazır kuruluyor; Compress-Archive büyük klasörlerde çok yavaş.
+        run: 7z a -tzip -mx=5 "SubtitleForge_v${{ steps.surum.outputs.surum }}_portable.zip" ./dist/run/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SubtitleForge_v${{ steps.surum.outputs.surum }}_portable
+          path: SubtitleForge_v${{ steps.surum.outputs.surum }}_portable.zip
+          retention-days: 90
+          compression-level: 0      # zaten sıkıştırılmış, tekrar sıkıştırma
+
+      - name: Releases sayfasına ekle
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "SubtitleForge ${GITHUB_REF_NAME}" \
+            --notes "Taşınabilir Windows sürümü. Zip'i açıp \`run.exe\` ile çalıştırın.
+
+          FFmpeg bilerek pakete dahil edilmiyor (her güncellemesinde exe'yi yeniden derlemek gerekirdi). Sisteminizde yoksa \`winget install Gyan.FFmpeg\` ile kurun ya da arayüzdeki 'FFmpeg Yolu > Gözat' ile elle seçin.
+
+          İnternetsiz kullanım için \`modelleri_kopyala.ps1\` ile model önbelleğini exe'nin yanına kopyalayabilirsiniz." \
+            "SubtitleForge_v${{ steps.surum.outputs.surum }}_portable.zip" \
+          || gh release upload "${GITHUB_REF_NAME}" \
+            "SubtitleForge_v${{ steps.surum.outputs.surum }}_portable.zip" --clobber

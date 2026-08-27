@@ -30,11 +30,29 @@ If you prefer to run it from source:
 
 ## Building the Executable
 
-This project uses PyInstaller. You can build the standalone executable yourself using the provided `run.spec` file:
+### Automatic builds (no local setup needed)
+
+Every push builds a portable Windows executable on a GitHub Actions Windows runner. To grab one:
+
+**Actions** tab → pick the newest green run → **Artifacts** → download `SubtitleForge_vX.Y.Z_portable.zip`.
+
+Unzip anywhere and run `run.exe` — it is fully portable, no installer. Tagging a commit `v*` additionally attaches the same zip to a GitHub Release.
+
+The workflow runs the test suite before building and fails the build if the version resource did not get embedded, so an artifact is never silently stale or unversioned.
+
+### Building locally
 
 ```bash
+pip install -r requirements.txt
+pip install pyinstaller
 pyinstaller run.spec
 ```
+
+The portable folder lands in `dist/run/`; `run.exe` inside it is the application.
+
+FFmpeg is deliberately **not** bundled — it updates often, and embedding it would mean rebuilding the executable for every FFmpeg release. Install it with `winget install Gyan.FFmpeg`, or point the app at an existing copy via **FFmpeg Yolu → Gözat**.
+
+For fully offline use, run `modelleri_kopyala.ps1` to copy the model cache into a `models` folder next to the executable.
 
 ### Versioning
 
