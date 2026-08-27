@@ -8,7 +8,8 @@ Welcome to **SubtitleForge**, an AI-powered desktop application designed to gene
 - **Accurate Transcription**: Built on WhisperX for robust, time-accurate speech recognition.
 - **Smart Hallucination Protection**: Custom logic to detect and prevent Whisper's repetitive loop hallucinations on long segments of silence or music.
 - **Multi-Window Language Detection**: Scans multiple parts of a video to correctly identify the language, bypassing Whisper's initial 30-second limitation.
-- **Built-in Translation**: Seamless subtitle translation powered by Google Translate, optimized with batched processing to prevent rate limits and speed up translation.
+- **Reliable Batched Translation**: Subtitle translation powered by Google Translate over an endpoint that preserves line boundaries, so a 40-line batch costs one request instead of forty. Misaligned batches are bisected rather than abandoned, and any lines lost to a rate limit are retried in dedicated repair rounds — no silently untranslated subtitles.
+- **Uncensored Mode**: Profanity and slang are transcribed and translated verbatim instead of being softened or masked. Can be toggled off in the UI.
 - **Fluent & Accessible UI**: A dark-themed, modern graphical interface built with Python's Tkinter.
 
 ## Installation & Usage

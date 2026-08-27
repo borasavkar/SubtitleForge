@@ -6,13 +6,25 @@ import time
 import json
 import gc
 import queue
+import random
+import re
 import shutil
 import subprocess
 import tkinter as tk
 from tkinter import filedialog, ttk, scrolledtext, messagebox
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import requests
 from deep_translator import GoogleTranslator
+
+# Windows konsolu varsayılan olarak cp1254 kullanıyor ve log satırlarındaki emojiler
+# UnicodeEncodeError ile çöküyordu (depodaki eski HATA_RAPORU.txt tam olarak buydu).
+# Hata yakalayıcının kendisi de print() kullandığı için çökme raporu bile basılamıyordu.
+for _akis in (sys.stdout, sys.stderr):
+    try:
+        _akis.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 # Ağır kütüphaneler (whisperx + torch) ilk "BAŞLAT"a kadar yüklenmiyor:
 # import'ları modül seviyesinde yapmak pencerenin açılmasını ~10 sn geciktiriyordu.
@@ -57,24 +69,92 @@ def hata_yakalayici(exctype, value, tb):
     hata_mesaji = "".join(traceback.format_exception(exctype, value, tb))
     with open(os.path.join(_APP_DIR, "HATA_RAPORU.txt"), "w", encoding="utf-8") as f:
         f.write(hata_mesaji)
-    print("\n" + "=" * 55)
-    print("❌ KRİTİK BİR ÇÖKME YAŞANDI! ❌")
-    print(hata_mesaji)
-    input("\nPencereyi kapatmak için ENTER tuşuna bas...")
+    # Pencereli (console=False) çalışırken stdout/stdin bulunmayabiliyor;
+    # rapor zaten dosyaya yazıldı, ekrana basmak başarısız olursa sessiz geçiyoruz.
+    try:
+        print("\n" + "=" * 55)
+        print("❌ KRİTİK BİR ÇÖKME YAŞANDI! ❌")
+        print(hata_mesaji)
+        input("\nPencereyi kapatmak için ENTER tuşuna bas...")
+    except Exception:
+        pass
 
 
 sys.excepthook = hata_yakalayici
 
 
 # --- ÇEVİRİ AYARLARI ---
-# Google'ın ücretsiz uç noktası istek başına ~5000 karaktere izin veriyor ve
-# deep_translator'ın translate_batch'i aslında satır başına AYRI bir istek atıyor.
+# Google'ın ücretsiz uç noktası istek başına ~5000 karaktere izin veriyor.
 # Satırları tek pakette birleştirip gönderiyoruz: ~1200 satırlık bir filmde
-# ~1200 istek yerine ~40 istek yapılıyor. Hem çok daha hızlı, hem de
+# ~1200 istek yerine ~35 istek yapılıyor. Hem çok daha hızlı, hem de
 # "429 Too Many Requests" yüzünden satır kaybetme riski neredeyse sıfırlanıyor.
-CEVIRI_MAX_KARAKTER = 1200   # tek istekte gönderilecek en fazla karakter
+#
+# ÖNEMLİ (eski sürümdeki "bazı cümleler çevrilmiyor" hatasının kaynağı):
+# deep_translator'ın GoogleTranslator'ı /m (mobil HTML) uç noktasını kullanıyor ve
+# dönen HTML'i `element.get_text(strip=True)` ile okuyor. Bu çağrı metindeki TÜM
+# satır sonlarını siliyor; yani çok satırlı paket her zaman TEK satır olarak geri
+# geliyordu. Satır sayısı hiçbir zaman tutmadığı için her paket satır-satır çeviriye
+# düşüyor, Google da bu istek yağmuruna 429 ile cevap verip satırları çevrilmemiş
+# bırakıyordu. Artık satır sonlarını koruyan translate_a/single uç noktasını
+# kullanan kendi istemcimiz (GoogleCevirici) devrede; deep_translator yalnızca
+# tek satırlık son çare yedeği olarak duruyor.
+CEVIRI_MAX_KARAKTER = 1600   # tek istekte gönderilecek en fazla karakter
 CEVIRI_MAX_SATIR = 40        # tek istekte gönderilecek en fazla satır
-CEVIRI_ISCI_SAYISI = 2       # eşzamanlı istek sayısı (Google'ı kızdırmamak için düşük)
+CEVIRI_ISCI_SAYISI = 3       # eşzamanlı istek sayısı (429 görülünce hepsi birlikte frenliyor)
+CEVIRI_ZAMAN_ASIMI = 25      # tek istek için saniye
+CEVIRI_ONARIM_TURU = 3       # ana geçişten sonra kaç kez "eksik satır" turu atılacak
+
+# Aynı istek birden fazla ana üzerinden denenebiliyor: biri 429 verse bile
+# diğerlerinden satır kurtarılabiliyor. Üçü de aynı JSON biçimini döndürüyor.
+CEVIRI_UC_NOKTALARI = (
+    "https://translate.googleapis.com/translate_a/single",
+    "https://translate.google.com/translate_a/single",
+    "https://clients5.google.com/translate_a/single",
+)
+CEVIRI_BASLIKLARI = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+    "Accept": "*/*",
+    "Accept-Language": "tr,en;q=0.9",
+}
+
+# --- SANSÜR KARŞITI AYARLAR ---
+# 1) Çeviri tarafı: /m uç noktası küfürleri bazen yıldızlayarak ("s**tir") ya da
+#    yumuşatarak döndürüyor. translate_a/single bunu yapmıyor; alttaki desen yine de
+#    yedek yoldan gelmiş yıldızlı satırları yakalayıp tekrar denemek için kullanılıyor.
+# 2) Transkripsiyon tarafı: Whisper'a metnin birebir yazılacağını söyleyen kısa bir
+#    initial_prompt veriliyor. İstem, MODELİN YAZDIĞI DİLDE olmak zorunda; yabancı
+#    dilde istem modeli o dile kaydırıp altyazıyı tamamen bozuyor. Bu yüzden yalnızca
+#    aşağıda karşılığı bulunan diller için uygulanıyor.
+
+# Yıldızlı maskeleme deseni. Rakamlar bilerek dışarıda: "2*3" ya da "5 * 3 = 15"
+# gibi çarpma ifadeleri sansür sanılıp boşuna yeniden çevriliyordu.
+# [^\W\d_] = "harf" (Türkçe/Kiril harfleri dahil, rakam ve alt çizgi hariç).
+SANSUR_DESENI = re.compile(r"[^\W\d_]\*(?:\*+|[^\W\d_])|\*{2,}[^\W\d_]|\*{3,}", re.UNICODE)
+
+SANSURSUZ_ISTEMLER = {
+    "tr": "Bu birebir bir deşifre metnidir. Küfür, argo ve müstehcen ifadeler "
+          "yumuşatılmadan, kısaltılmadan ve sansürlenmeden aynen yazılır. "
+          "Noktalama işaretleri eksiksiz kullanılır.",
+    "en": "This is a verbatim transcript. Profanity, slang and explicit language are "
+          "written out in full, exactly as spoken, without censoring or softening. "
+          "Punctuation is used throughout.",
+    "de": "Dies ist eine wortgetreue Abschrift. Schimpfwörter, Slang und explizite "
+          "Ausdrücke werden unzensiert und ungeschönt genau so geschrieben, wie sie "
+          "gesprochen werden. Die Zeichensetzung ist vollständig.",
+    "fr": "Ceci est une transcription mot à mot. Les grossièretés, l'argot et le langage "
+          "explicite sont écrits tels quels, sans censure ni adoucissement. "
+          "La ponctuation est complète.",
+    "it": "Questa è una trascrizione fedele. Volgarità, slang ed espressioni esplicite "
+          "sono riportate esattamente come vengono pronunciate, senza censura né "
+          "attenuazioni. La punteggiatura è completa.",
+    "es": "Esta es una transcripción literal. Las palabrotas, la jerga y el lenguaje "
+          "explícito se escriben tal y como se pronuncian, sin censura ni suavizado. "
+          "Se usa la puntuación completa.",
+    "ru": "Это дословная расшифровка. Ругательства, сленг и нецензурные выражения "
+          "записываются точно так, как они произнесены, без цензуры и смягчения. "
+          "Пунктуация используется полностью.",
+}
 
 # --- HALÜSİNASYON DÖNGÜSÜ KORUMASI ---
 # Whisper, uzun ve konuşma içeriği az seslerde (özellikle dil yanlış algılandığında)
@@ -109,13 +189,169 @@ class KullaniciIptali(Exception):
     pass
 
 
+class CeviriHatasi(Exception):
+    """Geçici çeviri hatası: ağ sorunu, HTTP hatası ya da bozuk yanıt."""
+    pass
+
+
+class GoogleCevirici:
+    """Satır hizasını koruyan Google Çeviri istemcisi.
+
+    Neden deep_translator yerine bu var: deep_translator'ın GoogleTranslator'ı
+    çeviriyi mobil HTML sayfasından `get_text(strip=True)` ile söküyor ve bu çağrı
+    satır sonlarını yok ediyor. translate_a/single uç noktası ise metni JSON olarak
+    döndürüyor ve gönderdiğimiz "\\n" ayraçlarını olduğu gibi koruyor -- toplu
+    çeviride satırların doğru altyazıya oturmasının tek güvenilir yolu bu.
+
+    Bir de "fren" var: uç nokta 429/503 verdiğinde tek bir işçi değil, TÜM işçiler
+    birlikte bekliyor. Eskiden her işçi kendi başına yeniden deneyip Google'ı daha
+    da kızdırıyor, sonunda satırlar çevrilmemiş kalıyordu.
+    """
+
+    def __init__(self, iptal_kontrolu=None, log=None):
+        self._iptal = iptal_kontrolu or (lambda: False)
+        self._log = log or (lambda mesaj: None)
+        # requests.Session thread-safe değil: her işçi kendi oturumunu kullanıyor.
+        self._yerel = threading.local()
+        self._kilit = threading.Lock()
+        self._fren_bitisi = 0.0
+        self.istek_sayisi = 0
+
+    # -- altyapı ----------------------------------------------------------
+
+    @property
+    def _oturum(self):
+        oturum = getattr(self._yerel, "oturum", None)
+        if oturum is None:
+            oturum = requests.Session()
+            oturum.headers.update(CEVIRI_BASLIKLARI)
+            self._yerel.oturum = oturum
+        return oturum
+
+    def bekle(self, saniye):
+        """İptale duyarlı bekleme: time.sleep(12) sırasında iptal edilen işlem
+        eskiden 12 saniye boyunca yanıt vermiyordu."""
+        bitis = time.monotonic() + saniye
+        while True:
+            kalan = bitis - time.monotonic()
+            if kalan <= 0:
+                return
+            if self._iptal():
+                raise KullaniciIptali()
+            time.sleep(min(0.25, kalan))
+
+    def _fren_bekle(self):
+        while True:
+            with self._kilit:
+                kalan = self._fren_bitisi - time.monotonic()
+            if kalan <= 0:
+                return
+            if self._iptal():
+                raise KullaniciIptali()
+            time.sleep(min(0.25, kalan))
+
+    def _fren_uygula(self, saniye):
+        with self._kilit:
+            self._fren_bitisi = max(self._fren_bitisi, time.monotonic() + saniye)
+
+    @staticmethod
+    def _yaniti_coz(veri):
+        """translate_a/single iki biçimde yanıt verebiliyor:
+        dj=1 ile {"sentences": [{"trans": ...}, ...]}, dj yok sayılırsa [[["...",...]]].
+        İkisini de aynı düz metne indiriyoruz."""
+        parcalar = []
+        if isinstance(veri, dict):
+            for cumle in veri.get("sentences") or []:
+                if isinstance(cumle, dict) and isinstance(cumle.get("trans"), str):
+                    parcalar.append(cumle["trans"])
+        elif isinstance(veri, list) and veri and isinstance(veri[0], list):
+            for cumle in veri[0]:
+                if isinstance(cumle, list) and cumle and isinstance(cumle[0], str):
+                    parcalar.append(cumle[0])
+        return "".join(parcalar)
+
+    def _tek_istek(self, uc_nokta, metin, kaynak, hedef):
+        parametreler = {
+            "client": "gtx",
+            "dj": "1",
+            "dt": "t",
+            "ie": "UTF-8",
+            "oe": "UTF-8",
+            "sl": kaynak or "auto",
+            "tl": hedef,
+        }
+        # Uzun paketler GET'in URL sınırını aşıyor (UTF-8 yüzde kodlaması metni
+        # 3-6 katına çıkarıyor); bu yüzden metin gövdede POST ediliyor.
+        try:
+            cevap = self._oturum.post(uc_nokta, params=parametreler, data={"q": metin},
+                                      timeout=CEVIRI_ZAMAN_ASIMI)
+            if cevap.status_code in (400, 404, 405, 411, 413, 414, 501):
+                cevap = self._oturum.get(uc_nokta, params=dict(parametreler, q=metin),
+                                         timeout=CEVIRI_ZAMAN_ASIMI)
+        except Exception as e:
+            raise CeviriHatasi(f"{e.__class__.__name__}: {e}")
+
+        with self._kilit:
+            self.istek_sayisi += 1
+
+        if cevap.status_code in (429, 503):
+            # Google hepimize kızdı: tek tek değil, topluca geri çekiliyoruz.
+            self._fren_uygula(random.uniform(6.0, 11.0))
+            raise CeviriHatasi(f"HTTP {cevap.status_code} (istek limiti)")
+        if cevap.status_code != 200:
+            raise CeviriHatasi(f"HTTP {cevap.status_code}")
+
+        try:
+            veri = cevap.json()
+        except Exception:
+            raise CeviriHatasi("yanıt JSON olarak çözülemedi")
+
+        cevrilmis = self._yaniti_coz(veri)
+        if not cevrilmis.strip():
+            raise CeviriHatasi("boş çeviri döndü")
+        return cevrilmis.replace("\r\n", "\n").replace("\r", "\n")
+
+    # -- genel arayüz -----------------------------------------------------
+
+    def cevir(self, metin, kaynak, hedef="tr", tur_sayisi=3):
+        """Metni çevirip düz metin döner. Satır sonları korunur.
+        Kalıcı başarısızlıkta CeviriHatasi fırlatır."""
+        son_hata = None
+        for tur in range(tur_sayisi):
+            for uc_nokta in CEVIRI_UC_NOKTALARI:
+                if self._iptal():
+                    raise KullaniciIptali()
+                self._fren_bekle()
+                try:
+                    return self._tek_istek(uc_nokta, metin, kaynak, hedef)
+                except CeviriHatasi as e:
+                    son_hata = e
+            if tur < tur_sayisi - 1:
+                # Üstel geri çekilme + jitter: işçilerin aynı anda tekrar
+                # denemesi (thundering herd) yeni bir 429 dalgası yaratıyordu.
+                self.bekle(min(2.0 * (2 ** tur), 15.0) + random.uniform(0, 1.0))
+        raise son_hata or CeviriHatasi("çeviri uç noktalarının hiçbiri yanıt vermedi")
+
+    def cevir_yedek(self, metin, kaynak, hedef="tr"):
+        """Son çare: deep_translator'ın /m uç noktası. Yalnızca TEK satır için
+        güvenli, çünkü o yol satır sonlarını siliyor. Başarısızsa None döner."""
+        try:
+            sonuc = GoogleTranslator(source=kaynak or "auto", target=hedef).translate(metin)
+        except Exception:
+            return None
+        if sonuc is None:
+            return None
+        sonuc = str(sonuc).strip()
+        return sonuc or None
+
+
 class WhisperApp:
     def __init__(self, root):
         self.root = root
         self.root.title("SubtitleForge")
         # Pencere yeniden boyutlandırılabilir: alt sınır, ayar kutularının hepsinin
         # sığdığı yükseklik (bunun altında terminal alanı ezilir).
-        self.root.minsize(700, 860)
+        self.root.minsize(700, 890)
 
         # --- ERİŞİLEBİLİR MODERN FLUENT TASARIM ---
         bg_color = "#1e1e1e"        # Koyu antrasit zemin (Göz yormaz)
@@ -165,6 +401,8 @@ class WhisperApp:
         self.align_model = None
         self.align_meta = None
         self.yuklu_align_dili = ""
+        self._cevirici = None           # GoogleCevirici, her çalıştırmada yeniden kurulur
+        self._ceviri_son_hata = None    # son çeviri hatası (kullanıcıya rapor için)
 
         # Log mesajları kuyrukta toplanır, ~100ms'de bir toplu basılır (UI'ı boğmamak için)
         self._log_queue = queue.Queue()
@@ -180,7 +418,7 @@ class WhisperApp:
 
         x = ayarlar.get("x", 100)
         y = ayarlar.get("y", 100)
-        self.root.geometry(f"700x1025+{x}+{y}")
+        self.root.geometry(f"700x1055+{x}+{y}")
 
         self.root.report_callback_exception = self.tk_hata_yakalayici
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -217,6 +455,7 @@ class WhisperApp:
         self.cpu_threads = tk.StringVar(value=str(ayarlar.get("cekirdek", varsayilan_cekirdek)))
         self.do_align = tk.BooleanVar(value=ayarlar.get("hizalama", True))
         self.auto_translate_tr = tk.BooleanVar(value=ayarlar.get("turkce", True))
+        self.uncensored = tk.BooleanVar(value=ayarlar.get("sansursuz", True))
 
         # Boş bırakılırsa sistemdeki ffmpeg (PATH) kullanılır. Elle bir yol
         # seçilirse o kullanılır. ffmpeg'i uygulamayla paketlemiyoruz: her ffmpeg
@@ -311,13 +550,16 @@ class WhisperApp:
                         variable=self.do_align).grid(row=10, column=0, columnspan=2, sticky="w", padx=5, pady=(12, 2))
 
         ttk.Checkbutton(frame_settings, text=" 🇹🇷 İşlem Bitince Ekstra Türkçe (.srt) Dosyası Üret",
-                        variable=self.auto_translate_tr).grid(row=11, column=0, columnspan=2, sticky="w", padx=5, pady=(2, 10))
+                        variable=self.auto_translate_tr).grid(row=11, column=0, columnspan=2, sticky="w", padx=5, pady=(2, 2))
+
+        ttk.Checkbutton(frame_settings, text=" 🔞 Sansürsüz Mod (küfür/argo yumuşatılmadan yazılsın)",
+                        variable=self.uncensored).grid(row=12, column=0, columnspan=2, sticky="w", padx=5, pady=(2, 10))
 
         tk.Label(frame_settings,
                  text="💡 İPUCU: Ekran kartı kullanılmıyor, tüm iş işlemcide dönüyor. Filmler için en dengeli ayar\n"
                       "     large-v3-turbo + int8'dir. Hizalama kapatılırsa hız artar, zamanlama kabalaşır.",
                  justify="left", bg=bg_color, fg="#aaaaaa", font=("Segoe UI", 9, "italic")
-                 ).grid(row=12, column=0, columnspan=2, sticky="w", padx=5)
+                 ).grid(row=13, column=0, columnspan=2, sticky="w", padx=5)
 
         # --- YÜKSEK KONTRASTLI ANA BUTONLAR ---
         frame_buttons = tk.Frame(root, bg=bg_color)
@@ -399,6 +641,7 @@ class WhisperApp:
                     "ffmpeg": self.ffmpeg_path.get(),
                     "hizalama": self.do_align.get(),
                     "turkce": self.auto_translate_tr.get(),
+                    "sansursuz": self.uncensored.get(),
                 }, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
@@ -599,9 +842,13 @@ class WhisperApp:
         return None if deger != deger else deger   # NaN kontrolü
 
     def _satir_kir(self, metin):
-        """Uzun bir altyazı satırını en fazla 2 satıra böler.
+        """Uzun bir altyazı satırını dengeli biçimde en fazla 3 satıra böler.
         Bölme yalnızca dosyaya yazarken yapılıyor: metin bellekte tek satır kalırsa
-        Google'a paket halinde gönderilen çeviri hizalaması bozulmuyor."""
+        Google'a paket halinde gönderilen çeviri hizalaması bozulmuyor.
+
+        Neden 2 değil 3: Türkçe çeviri kaynak metinden %20-30 uzayabiliyor. 75
+        karakterlik bir İngilizce blok 100+ karaktere çıkınca iki satıra sıkıştırmak
+        ekranda 50'şer karakterlik, okunması zor satırlar üretiyordu."""
         metin = " ".join(metin.split())
         if len(metin) <= SATIR_MAX_KARAKTER:
             return metin
@@ -610,16 +857,49 @@ class WhisperApp:
         if len(kelimeler) < 2:
             return metin
 
-        # Ortaya en yakın boşluktan böl: iki satır da mümkün olduğunca eşit olsun.
-        en_iyi_i, en_iyi_fark = 1, None
-        uzunluk = 0
-        for i in range(len(kelimeler) - 1):
-            uzunluk += len(kelimeler[i]) + 1
-            fark = abs(uzunluk - (len(metin) - uzunluk))
-            if en_iyi_fark is None or fark < en_iyi_fark:
-                en_iyi_fark, en_iyi_i = fark, i + 1
+        satir_sayisi = min(3, max(2, -(-len(metin) // SATIR_MAX_KARAKTER)))
+        satir_sayisi = min(satir_sayisi, len(kelimeler))
+        hedef = len(metin) / satir_sayisi
 
-        return " ".join(kelimeler[:en_iyi_i]) + "\n" + " ".join(kelimeler[en_iyi_i:])
+        # Her satırı hedef uzunluğa en yakın yerde kapatıyoruz: kelime eklemek
+        # satırı hedeften UZAKLAŞTIRIYORSA orada kesiyoruz.
+        satirlar, mevcut = [], []
+        for kelime in kelimeler:
+            if not mevcut:
+                mevcut.append(kelime)
+                continue
+            simdiki = " ".join(mevcut)
+            aday = f"{simdiki} {kelime}"
+            son_satir = len(satirlar) == satir_sayisi - 1
+            if not son_satir and abs(len(aday) - hedef) > abs(len(simdiki) - hedef):
+                satirlar.append(simdiki)
+                mevcut = [kelime]
+            else:
+                mevcut.append(kelime)
+        if mevcut:
+            satirlar.append(" ".join(mevcut))
+
+        return "\n".join(satirlar)
+
+    def _zamanlari_duzelt(self, bloklar):
+        """Sıfır/negatif süreli ve üst üste binen blokları düzeltir.
+
+        whisperx komşu segmentleri bazen çakışan zamanlarla üretiyor; hizalama da
+        aynı damgayı iki kelimeye verebiliyor. Oynatıcılar böyle blokları ya hiç
+        göstermiyor ya da bir öncekini anında eziyor -- ekranda 'atlanmış' gibi
+        görünen altyazıların bir kısmı buradan geliyordu."""
+        MIN_SURE = 0.05
+        onceki_son = None
+        for blok in bloklar:
+            bas = self._sayi(blok.get("start")) or 0.0
+            son = self._sayi(blok.get("end"))
+            if onceki_son is not None and bas < onceki_son:
+                bas = onceki_son
+            if son is None or son < bas + MIN_SURE:
+                son = bas + MIN_SURE
+            blok["start"], blok["end"] = bas, son
+            onceki_son = son
+        return bloklar
 
     # ------------------------------------------------------------------
     # DİL TESPİTİ
@@ -848,28 +1128,27 @@ class WhisperApp:
         return temiz, atilan, en_uzun
 
     def _srt_yaz(self, yol, bloklar, metinler=None):
+        sira = 0
         with open(yol, "w", encoding="utf-8") as f:
             for i, blok in enumerate(bloklar):
                 metin = metinler.get(i, blok["text"]) if metinler is not None else blok["text"]
+                metin = self._satir_kir(metin or "")
+                if not metin.strip():
+                    continue      # boş blok SRT'yi bozuyor, numarayı da harcamamalı
+                sira += 1
                 bas = self.format_timestamp(blok["start"])
                 son = self.format_timestamp(blok["end"])
-                f.write(f"{i + 1}\n{bas} --> {son}\n{self._satir_kir(metin)}\n\n")
+                f.write(f"{sira}\n{bas} --> {son}\n{metin}\n\n")
 
     # ------------------------------------------------------------------
     # ÇEVİRİ YARDIMCILARI
     # ------------------------------------------------------------------
 
-    def _bekleme_suresi(self, deneme):
-        # Üstel geri çekilme: 1.5 → 3 → 6 → 12 sn.
-        # Google 429 verdiğinde limit birkaç saniye sürüyor; sabit bekleme
-        # (ya da hiç beklememe) yüzünden arka arkaya satırlar düşüyordu.
-        return min(1.5 * (2 ** deneme), 12)
-
-    def _satir_gruplari(self, metinler):
-        """Satır indekslerini, karakter/satır sınırını aşmayan gruplara böler."""
+    def _satir_gruplari(self, indeksler, metinler):
+        """Verilen satır indekslerini, karakter/satır sınırını aşmayan paketlere böler."""
         grup, uzunluk = [], 0
-        for i, metin in enumerate(metinler):
-            satir_uzunlugu = len(metin) + 1
+        for i in indeksler:
+            satir_uzunlugu = len(metinler[i]) + 1
             if grup and (uzunluk + satir_uzunlugu > CEVIRI_MAX_KARAKTER or len(grup) >= CEVIRI_MAX_SATIR):
                 yield grup
                 grup, uzunluk = [], 0
@@ -878,56 +1157,219 @@ class WhisperApp:
         if grup:
             yield grup
 
-    def _tek_satir_cevir(self, translator, metin):
+    @staticmethod
+    def _cevrilmeye_deger(metin):
+        """Sadece noktalama/nota işareti içeren satırlar ("...", "- -", "♪") çeviriye
+        gönderilmiyor: Google bunları yutup paketten düşürüyor ve satır hizası kayıyordu."""
+        return bool(metin.strip()) and any(ch.isalnum() for ch in metin)
+
+    def _tek_satir_cevir(self, metin, kaynak_dil, yedek_kullan=True):
         """Tek satırı çevirir. Kalıcı olarak başarısız olursa None döner
         (çağıran taraf o satırda orijinal metni korur)."""
-        for deneme in range(4):
+        temiz = metin.strip()
+        if not self._cevrilmeye_deger(temiz):
+            return metin
+
+        try:
+            sonuc = self._cevirici.cevir(temiz, kaynak_dil)
+            if sonuc.strip():
+                return sonuc.strip()
+        except KullaniciIptali:
+            raise
+        except CeviriHatasi:
+            pass
+
+        if not yedek_kullan or self.is_cancelled:
+            return None
+        return self._cevirici.cevir_yedek(temiz, kaynak_dil)
+
+    def _grup_cevir(self, grup, satirlar, kaynak_dil, sonuclar):
+        """Bir paketi tek istekte çevirip `sonuclar` sözlüğüne {indeks: çeviri} yazar.
+
+        Google bazen satırları birleştirip/bölerek farklı sayıda satır döndürüyor.
+        Sayı tutmazsa hizalama kayar (o paketten sonraki TÜM altyazılar yanlış metinle
+        eşleşir), bu yüzden yalnızca birebir eşleşme kabul ediliyor. Eşleşmezse paket
+        İKİYE BÖLÜNÜP tekrar deneniyor: 40 satırlık bir pakette tek bir sorunlu satır
+        için 40 ayrı istek atmak yerine ~10 istekle sorunlu satır izole ediliyor.
+
+        Ağ/limit hatasında bölmek işe yaramaz (istek sayısını katlar, 429'u besler);
+        o paket olduğu gibi bırakılıp onarım turuna devrediliyor."""
+        if not grup:
+            return
+
+        metinler = [satirlar[i] for i in grup]
+        hizasiz = False
+        try:
+            cevrilmis = self._cevirici.cevir("\n".join(metinler), kaynak_dil)
+            parcalar = cevrilmis.split("\n")
+            if len(parcalar) == len(grup):
+                for i, parca in zip(grup, parcalar):
+                    parca = parca.strip()
+                    sonuclar[i] = parca if parca else satirlar[i]
+                return
+            hizasiz = True
+        except KullaniciIptali:
+            raise
+        except CeviriHatasi as e:
+            self._ceviri_son_hata = str(e)
+
+        if not hizasiz:
+            return                      # ağ/limit sorunu → onarım turu tekrar dener
+
+        if len(grup) == 1:
+            ceviri = self._tek_satir_cevir(satirlar[grup[0]], kaynak_dil)
+            if ceviri is not None:
+                sonuclar[grup[0]] = ceviri
+            return
+
+        orta = len(grup) // 2
+        self._grup_cevir(grup[:orta], satirlar, kaynak_dil, sonuclar)
+        self._grup_cevir(grup[orta:], satirlar, kaynak_dil, sonuclar)
+
+    def _bloklari_cevir(self, bloklar, kaynak_dil):
+        """Altyazı bloklarını Türkçeye çevirir.
+
+        {indeks: çeviri} sözlüğü döner. Sözlükte yer almayan indeksler kalıcı olarak
+        çevrilememiş demektir; çağıran taraf o satırlarda orijinal metni bırakıyor.
+
+        Akış: paketleme → eşzamanlı çeviri → eksik kalanlar için onarım turları →
+        sansür denetimi. Onarım turları olmadan, geçici bir ağ/limit hatasına denk
+        gelen paketteki bütün satırlar sessizce çevrilmemiş kalıyordu."""
+        self._cevirici = GoogleCevirici(iptal_kontrolu=lambda: self.is_cancelled, log=self.log)
+        self._ceviri_son_hata = None
+        t_ceviri = time.time()
+
+        # Satır içi satır sonu paket hizasını bozar; blok kurucu üretmiyor ama
+        # çeviriye giren metni yine de tek satıra indirgiyoruz.
+        satirlar = [" ".join((b.get("text") or "").split()) for b in bloklar]
+
+        # Yalnızca noktalama içeren satırları ("...", "♪", "- -") baştan ayırıyoruz:
+        # Google bunları yutup paketten düşürüyor, satır hizası da kayıyordu.
+        ceviriler = {}
+        cevrilecek = []
+        for i, satir in enumerate(satirlar):
+            if self._cevrilmeye_deger(satir):
+                cevrilecek.append(i)
+            else:
+                ceviriler[i] = satir
+
+        gruplar = list(self._satir_gruplari(cevrilecek, satirlar))
+        if not gruplar:
+            return ceviriler
+
+        self.log(f"   {len(cevrilecek)} satır, {len(gruplar)} pakette gönderilecek "
+                 f"({CEVIRI_ISCI_SAYISI} eşzamanlı istek).")
+
+        def grup_isi(grup):
+            yerel = {}
+            self._grup_cevir(grup, satirlar, kaynak_dil, yerel)
+            return yerel
+
+        tamamlanan = 0
+        futures = []
+        executor = ThreadPoolExecutor(max_workers=CEVIRI_ISCI_SAYISI)
+        try:
+            futures = [executor.submit(grup_isi, g) for g in gruplar]
+            for future in as_completed(futures):
+                # Sonucu İPTAL KONTROLÜNDEN ÖNCE topluyoruz: as_completed bu paketi
+                # zaten bitmiş olduğu için verdi, önce iptale bakıp break edersek
+                # tamamlanmış bir paketin çevirisi çöpe gidiyordu.
+                # Ayrıca tek bir paketin patlaması eskiden run_process'i "KRİTİK
+                # HATA"ya düşürüp o ana kadarki BÜTÜN çevirileri kaybettiriyordu.
+                try:
+                    ceviriler.update(future.result())
+                except KullaniciIptali:
+                    pass
+                except Exception as e:
+                    self._ceviri_son_hata = str(e)
+                    self.log(f"   ⚠️ Bir çeviri paketi hata verdi ({e}); onarım turunda tekrar denenecek.")
+
+                tamamlanan += 1
+                yuzde = tamamlanan * 100 / len(gruplar)
+                self.ilerleme(yuzde, f"Çeviri: %{yuzde:.0f} ({tamamlanan}/{len(gruplar)} paket)")
+                if tamamlanan % 5 == 0 or tamamlanan == len(gruplar):
+                    self.log(f"   🌐 Çeviri: %{yuzde:.0f}  ({tamamlanan}/{len(gruplar)} paket, "
+                             f"{self._sure_metni(time.time() - t_ceviri)})")
+
+                if self.is_cancelled:
+                    for bekleyen in futures:
+                        bekleyen.cancel()
+                    break
+        finally:
+            executor.shutdown(wait=True)
+
+        # İptalde kuyruk boşaltılırken çalışmakta olan paketler yine de bitiyor;
+        # okunmadan bırakılan sonuçları burada topluyoruz.
+        for bekleyen in futures:
+            if bekleyen.done() and not bekleyen.cancelled():
+                try:
+                    ceviriler.update(bekleyen.result())
+                except Exception:
+                    pass
+
+        # --- ONARIM TURLARI ---
+        # Ana geçişte ağ/istek limiti yüzünden düşen satırlar burada tekrar deneniyor.
+        # Eskiden bu satırlar sessizce orijinal diliyle dosyaya yazılıyordu;
+        # "bazı cümleler çevrilmemiş" şikâyetinin ikinci sebebi buydu.
+        for tur in range(1, CEVIRI_ONARIM_TURU + 1):
             if self.is_cancelled:
-                return None
+                break
+            eksik = [i for i in cevrilecek if i not in ceviriler]
+            if not eksik:
+                break
+
+            self.log(f"   🔁 Onarım turu {tur}/{CEVIRI_ONARIM_TURU}: {len(eksik)} satır tekrar deneniyor...")
             try:
-                sonuc = translator.translate(metin)
-                # deep_translator, çeviri kaynakla birebir aynı çıktığında None
-                # döndürebiliyor (ör. "...", "- -" gibi sadece noktalama içeren
-                # satırlar). Bu bir hata değil; eskiden bu None doğrudan dosyaya
-                # yazılıp altyazıda "None" olarak görünüyordu.
-                if sonuc is None or not sonuc.strip():
-                    return metin
-                return sonuc
-            except Exception:
-                time.sleep(self._bekleme_suresi(deneme))
-        return None
+                # Limit yediysek bir soluklanma; her turda biraz daha uzun.
+                self._cevirici.bekle(min(3.0 * tur, 12.0))
+            except KullaniciIptali:
+                break
 
-    def _grup_cevir(self, grup_metinleri, kaynak_dil):
-        """Bir grup satırı TEK istekte çevirir; hizalama bozulursa satır satır çevirir.
-        Her zaman len(grup_metinleri) uzunluğunda liste döner; çevrilemeyen satırlar None."""
-        # Not: GoogleTranslator nesnesi thread-safe DEĞİL (istek parametrelerini
-        # kendi üzerinde tutuyor), bu yüzden her görev kendi nesnesini kurar.
-        translator = GoogleTranslator(source=kaynak_dil, target='tr')
+            kucuk_gruplar = [eksik[j:j + 10] for j in range(0, len(eksik), 10)]
+            for sira, kucuk in enumerate(kucuk_gruplar, 1):
+                if self.is_cancelled:
+                    break
+                try:
+                    self._grup_cevir(kucuk, satirlar, kaynak_dil, ceviriler)
+                except KullaniciIptali:
+                    break
+                except Exception as e:
+                    self._ceviri_son_hata = str(e)
+                yuzde = sira * 100 / len(kucuk_gruplar)
+                self.ilerleme(yuzde, f"Çeviri onarımı {tur}: %{yuzde:.0f} ({sira}/{len(kucuk_gruplar)})")
 
-        paket = "\n".join(grup_metinleri)
-        for deneme in range(3):
+        # --- SANSÜR DENETİMİ ---
+        if self.uncensored.get() and not self.is_cancelled:
+            try:
+                self._sansuru_onar(ceviriler, satirlar, kaynak_dil)
+            except KullaniciIptali:
+                pass
+
+        basarili = sum(1 for i in cevrilecek if i in ceviriler)
+        self.log(f"   📊 {basarili}/{len(cevrilecek)} satır çevrildi "
+                 f"({self._cevirici.istek_sayisi} istek, {self._sure_metni(time.time() - t_ceviri)}).")
+        return ceviriler
+
+    def _sansuru_onar(self, ceviriler, satirlar, kaynak_dil):
+        """Yedek yoldan (deep_translator /m) gelen satırlarda küfürler bazen
+        yıldızlanmış oluyor ("s**tir"). Kaynakta yıldız yokken çeviride varsa satır,
+        sansür uygulamayan translate_a/single uç noktasından tekrar isteniyor."""
+        supheli = [i for i, ceviri in ceviriler.items()
+                   if SANSUR_DESENI.search(ceviri) and not SANSUR_DESENI.search(satirlar[i])]
+        if not supheli:
+            return
+
+        self.log(f"   🔞 {len(supheli)} satırda yıldızlanmış (sansürlü) çeviri bulundu, tekrar isteniyor...")
+        duzelen = 0
+        for i in supheli:
             if self.is_cancelled:
-                return [None] * len(grup_metinleri)
-            try:
-                sonuc = translator.translate(paket)
-                if sonuc:
-                    parcalar = sonuc.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-                    # Google bazen satırları birleştirip/bölerek farklı sayıda satır
-                    # döndürür. Sayı tutmazsa hizalama kayar (o gruptan sonraki TÜM
-                    # altyazılar yanlış metinle eşleşir), bu yüzden yalnızca birebir
-                    # eşleşmeyi kabul ediyoruz.
-                    if len(parcalar) == len(grup_metinleri):
-                        return parcalar
-                break  # hizalama bozuk: tekrar denemek düzeltmez, satır satıra geç
-            except Exception:
-                time.sleep(self._bekleme_suresi(deneme))
-
-        # YEDEK PLAN: paket çevirisi tutmadı → hizalamayı garantilemek için satır satır
-        sonuclar = []
-        for metin in grup_metinleri:
-            sonuclar.append(self._tek_satir_cevir(translator, metin))
-            time.sleep(0.25)
-        return sonuclar
+                break
+            # yedek_kullan=False: sansürü zaten yedek yol getirdi, oraya geri dönmüyoruz.
+            yeni = self._tek_satir_cevir(satirlar[i], kaynak_dil, yedek_kullan=False)
+            if yeni and not SANSUR_DESENI.search(yeni):
+                ceviriler[i] = yeni
+                duzelen += 1
+        self.log(f"   🔞 {duzelen}/{len(supheli)} satırdaki sansür kaldırıldı.")
 
     # ------------------------------------------------------------------
     # MODEL YÖNETİMİ
@@ -983,6 +1425,38 @@ class WhisperApp:
             self.log("⚡ Model zaten bellekte, beklemeden işleme geçiliyor!")
             self.pipeline._vad_params["vad_onset"] = vad_onset
             self.pipeline._vad_params["vad_offset"] = vad_offset
+
+    def _istem_ayarla(self, istem):
+        """Yüklü modelin initial_prompt'unu modeli YENİDEN YÜKLEMEDEN değiştirir.
+        whisperx'in kendisi de suppress_tokens'ı aynı yöntemle (dataclasses.replace)
+        değiştiriyor, yani desteklenen bir müdahale. Model büyük ve CPU'da yeniden
+        yüklemek dakikalar sürebildiği için bu yol tercih ediliyor."""
+        secenekler = getattr(self.pipeline, "options", None)
+        if secenekler is None:
+            return False
+        try:
+            if hasattr(secenekler, "_replace"):                     # NamedTuple sürümleri
+                self.pipeline.options = secenekler._replace(initial_prompt=istem)
+            else:
+                from dataclasses import replace as _degistir
+                self.pipeline.options = _degistir(secenekler, initial_prompt=istem)
+            return True
+        except Exception:
+            try:
+                secenekler.initial_prompt = istem
+                return True
+            except Exception:
+                return False
+
+    def _sansursuz_istem(self, dil, sansursuz):
+        """Whisper'a metnin birebir yazılacağını söyleyen kısa istemi seçer.
+
+        İstem MODELİN YAZACAĞI DİLDE olmalı: yabancı dilde bir istem modeli o dile
+        kaydırıp altyazıyı tamamen bozuyor. Karşılığı olmayan dillerde istem
+        verilmiyor (None), böylece hiç değilse doğru dilde çıktı garanti."""
+        if not sansursuz:
+            return None
+        return SANSURSUZ_ISTEMLER.get((dil or "").lower())
 
     def _align_modeli_hazirla(self, dil):
         """Dile özel hizalama (wav2vec2) modelini yükler. Model yoksa None döner."""
@@ -1130,6 +1604,20 @@ class WhisperApp:
             if self.is_cancelled:
                 raise KullaniciIptali()
 
+            # --- 3b) SANSÜRSÜZ MOD ---
+            # Modeli yeniden yüklemeden initial_prompt'u ayarlıyoruz. Dil ancak bu
+            # noktada kesinleştiği için (oylama 3. adımda bitiyor) burada yapılıyor.
+            sansursuz = self.uncensored.get()
+            istem_dili = "en" if task == "translate" else (secilen_dil or "")
+            istem = self._sansursuz_istem(istem_dili, sansursuz)
+            if self._istem_ayarla(istem):
+                if istem:
+                    self.log("🔞 Sansürsüz mod açık: metin birebir, küfür/argo yumuşatılmadan yazılacak.")
+                elif sansursuz and istem_dili:
+                    self.log(f"ℹ️ Sansürsüz mod için '{istem_dili.upper()}' dilinde hazır istem yok; "
+                             "Whisper varsayılan davranışıyla devam ediyor.")
+                    self.log("   (Yabancı dilde istem vermek modeli o dile kaydırıp altyazıyı bozuyor.)")
+
             # --- 4) SESİ METNE ÇEVİR ---
             self.log(f"🎙️ Sesler Metne Dönüştürülüyor (batch {batch_size}, {cekirdek} çekirdek)...")
             self.log("   ⚠️ İşlemci üzerinde çalışıyor; uzun videolarda bu adım saatler sürebilir.")
@@ -1215,6 +1703,9 @@ class WhisperApp:
                 self.log("   💡 Bu genellikle dilin yanlış algılanmasından olur.")
                 self.log("      'Videonun Dili' kutusundan dili elle seçip tekrar deneyin.")
 
+            # Çakışan/sıfır süreli bloklar oynatıcıda görünmüyor: yazmadan önce düzelt.
+            srt_blocks = self._zamanlari_duzelt(srt_blocks)
+
             for blok in srt_blocks:
                 self.log(f"[{self.format_timestamp(blok['start'])}] {blok['text'][:45]}")
 
@@ -1264,38 +1755,7 @@ class WhisperApp:
                 except Exception:
                     ceviri_kaynak_dili = "auto"
 
-                texts_to_translate = [b['text'] for b in srt_blocks]
-                gruplar = list(self._satir_gruplari(texts_to_translate))
-                translated_texts = {}
-                tamamlanan = 0
-                t_ceviri = time.time()
-
-                self.log(f"   {len(texts_to_translate)} satır, {len(gruplar)} pakette gönderilecek.")
-
-                def grup_isi(grup):
-                    return grup, self._grup_cevir([texts_to_translate[i] for i in grup], ceviri_kaynak_dili)
-
-                with ThreadPoolExecutor(max_workers=CEVIRI_ISCI_SAYISI) as executor:
-                    futures = [executor.submit(grup_isi, g) for g in gruplar]
-                    for future in as_completed(futures):
-                        if self.is_cancelled:
-                            for bekleyen in futures:
-                                bekleyen.cancel()
-                            break
-
-                        grup, sonuclar = future.result()
-                        for idx, ceviri in zip(grup, sonuclar):
-                            # ceviri None ise o satır kalıcı olarak çevrilemedi:
-                            # sözlüğe yazmıyoruz, aşağıda orijinal metin kullanılacak.
-                            if ceviri is not None:
-                                translated_texts[idx] = ceviri
-
-                        tamamlanan += 1
-                        yuzde = tamamlanan * 100 / len(gruplar)
-                        self.ilerleme(yuzde, f"Çeviri: %{yuzde:.0f} ({tamamlanan}/{len(gruplar)} paket)")
-                        if tamamlanan % 5 == 0 or tamamlanan == len(gruplar):
-                            self.log(f"   🌐 Çeviri: %{yuzde:.0f}  ({tamamlanan}/{len(gruplar)} paket, "
-                                     f"{self._sure_metni(time.time() - t_ceviri)})")
+                translated_texts = self._bloklari_cevir(srt_blocks, ceviri_kaynak_dili)
 
                 if self.is_cancelled:
                     self.log("🛑 Çeviri yarıda kesildi; o ana kadar çevrilenler kaydediliyor.")
@@ -1307,6 +1767,8 @@ class WhisperApp:
                 cevrilemeyen = len(srt_blocks) - len(translated_texts)
                 if cevrilemeyen > 0 and not self.is_cancelled:
                     self.log(f"⚠️ {cevrilemeyen}/{len(srt_blocks)} satır çevrilemedi; bu satırlarda orijinal metin bırakıldı.")
+                    if self._ceviri_son_hata:
+                        self.log(f"   Son hata: {self._ceviri_son_hata}")
                     self.log("   (Sebep genellikle Google'ın geçici istek limitidir. İşlemi tekrar çalıştırmak bu satırları düzeltir.)")
             elif self.auto_translate_tr.get() and ceviri_kaynak_dili == "tr":
                 self.log("ℹ️ Video zaten Türkçe; ayrıca çeviri dosyası üretilmedi.")
