@@ -36,7 +36,7 @@ Every push builds a portable Windows executable on a GitHub Actions Windows runn
 
 **Actions** tab → pick the newest green run → **Artifacts** → download `SubtitleForge_vX.Y.Z_portable.zip`.
 
-Unzip anywhere and run `run.exe` — it is fully portable, no installer. Tagging a commit `v*` additionally attaches the same zip to a GitHub Release.
+Unzip anywhere and run `SubtitleForge.exe` — it is fully portable, no installer. Tagging a commit `v*` additionally attaches the same zip to a GitHub Release.
 
 The workflow runs the test suite before building and fails the build if the version resource did not get embedded, so an artifact is never silently stale or unversioned.
 
@@ -48,7 +48,7 @@ pip install pyinstaller
 pyinstaller run.spec
 ```
 
-The portable folder lands in `dist/run/`; `run.exe` inside it is the application.
+The portable folder lands in `dist/run/`; `SubtitleForge.exe` inside it is the application.
 
 FFmpeg is deliberately **not** bundled — it updates often, and embedding it would mean rebuilding the executable for every FFmpeg release. Install it with `winget install Gyan.FFmpeg`, or point the app at an existing copy via **FFmpeg Yolu → Gözat**.
 
@@ -62,7 +62,7 @@ Every build stamps itself so you can always tell whether the executable you are 
 
 - **Window title** — `SubtitleForge v1.1.0`
 - **First line of the log panel** — `SubtitleForge v1.1.0 · 2026-08-27 20:47 derlemesi · b8472c8` (build timestamp and the git commit it was built from). Running from source shows `kaynaktan çalışıyor` instead.
-- **Windows file properties** — right-click `run.exe` → Properties → Details shows File version and Product version.
+- **Windows file properties** — right-click `SubtitleForge.exe` → Properties → Details shows File version and Product version.
 - **Crash reports** — `HATA_RAPORU.txt` starts with the version line, so a shared report identifies its build.
 
 The build timestamp and commit are written into a generated `_derleme_bilgisi.py` by `run.spec` at build time; it is git-ignored and never edited by hand.

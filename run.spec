@@ -58,7 +58,7 @@ else:
                              'SubtitleForge - WhisperX altyazı üretici ve çevirmen'),
                 StringStruct('FileVersion', SURUM),
                 StringStruct('InternalName', 'SubtitleForge'),
-                StringStruct('OriginalFilename', 'run.exe'),
+                StringStruct('OriginalFilename', 'SubtitleForge.exe'),
                 StringStruct('ProductName', 'SubtitleForge'),
                 StringStruct('ProductVersion', f'{SURUM} ({DERLEME_TARIHI})'),
             ])]),
@@ -114,7 +114,9 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='run',
+    # Uygulamanın adı SubtitleForge; exe'nin giriş betiği run.py diye
+    # 'run.exe' olarak çıkıyordu. Klasör adı (COLLECT) 'run' kalıyor.
+    name='SubtitleForge',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

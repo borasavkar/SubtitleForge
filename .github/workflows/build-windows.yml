@@ -56,7 +56,7 @@ jobs:
       - name: Sürümün gerçekten gömüldüğünü doğrula
         shell: pwsh
         run: |
-          $s = (Get-Item dist/run/run.exe).VersionInfo
+          $s = (Get-Item dist/run/SubtitleForge.exe).VersionInfo
           Write-Host "FileVersion    : $($s.FileVersion)"
           Write-Host "ProductVersion : $($s.ProductVersion)"
           if ($s.FileVersion -notlike "${{ steps.surum.outputs.surum }}*") {
@@ -83,7 +83,7 @@ jobs:
         run: |
           gh release create "${GITHUB_REF_NAME}" \
             --title "SubtitleForge ${GITHUB_REF_NAME}" \
-            --notes "Taşınabilir Windows sürümü. Zip'i açıp \`run.exe\` ile çalıştırın.
+            --notes "Taşınabilir Windows sürümü. Zip'i açıp \`SubtitleForge.exe\` ile çalıştırın.
 
           FFmpeg bilerek pakete dahil edilmiyor (her güncellemesinde exe'yi yeniden derlemek gerekirdi). Sisteminizde yoksa \`winget install Gyan.FFmpeg\` ile kurun ya da arayüzdeki 'FFmpeg Yolu > Gözat' ile elle seçin.
 
