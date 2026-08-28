@@ -150,6 +150,14 @@ CEVIRI_LIMIT_ESIGI = 18      # arka arkaya bu kadar 429/503 -> birincil yol kapa
 # devreye girmiyor, tam eşik (CEVIRI_LIMIT_ESIGI) aranıyor.
 CEVIRI_LIMIT_HIZLI = 9       # hiç başarı yokken bu kadar istek -> yol kapalı sayılır
 CEVIRI_YEDEK_ISCI = 3        # yedek yolda eşzamanlı istek (satır satır gidiyor)
+# Yedek yol da geçici olarak reddedebiliyor (ölçüldü: 10 satırın 2'si bir turda
+# düştü, sonraki turda sorunsuz geldi). Tek denemede bırakılırsa o satır kalıcı
+# olarak çevrilmemiş kalıyor ve kullanıcı "bazı cümleleri atlıyor" diyor.
+CEVIRI_YEDEK_TURU = 4        # yedek yolda eksik kalan satırlar kaç tur tekrar denenir
+# Turlar arası bekleme: 2-4 sn çok kısaydı, yorgun uç nokta toparlanamadan tekrar
+# yükleniyorduk (ölçüldü: 3 turda 4 satır hâlâ düşüyordu). 6/12/18 sn ile uç nokta
+# nefes alıyor; toplam ek maliyet en kötü ihtimalle ~36 sn.
+CEVIRI_YEDEK_BEKLEME = 6.0   # tur başına saniye (tur 2 -> 6sn, tur 3 -> 12sn, ...)
 
 # Aynı istek birden fazla ana üzerinden denenebiliyor: biri 429 verse bile
 # diğerlerinden satır kurtarılabiliyor. Üçü de aynı JSON biçimini döndürüyor.
@@ -1611,6 +1619,34 @@ class WhisperApp:
         kilit = threading.Lock()
         durum = {"ardisik_hata": 0, "pes": False}
 
+        for yedek_tur in range(1, CEVIRI_YEDEK_TURU + 1):
+            bu_tur = [i for i in eksik if i not in ceviriler]
+            if not bu_tur or durum["pes"] or self.is_cancelled:
+                break
+            if yedek_tur > 1:
+                self.log(f"   🔁 Yedek yol turu {yedek_tur}/{CEVIRI_YEDEK_TURU}: "
+                         f"{len(bu_tur)} satır tekrar deneniyor...")
+                try:
+                    self._cevirici.bekle(CEVIRI_YEDEK_BEKLEME * (yedek_tur - 1))
+                except KullaniciIptali:
+                    break
+                # Yeni tur temiz sayfa: önceki turun hataları pes ettirmesin.
+                with kilit:
+                    durum["ardisik_hata"] = 0
+            self._yedek_tek_gecis(bu_tur, satirlar, kaynak_dil, ceviriler,
+                                  kilit, durum, t_yedek)
+
+        if durum["pes"]:
+            self.log(f"   ⚠️ Yedek yol da arka arkaya {CEVIRI_LIMIT_ESIGI} kez başarısız oldu; "
+                     f"çeviri burada bırakıldı. Kalan satırlarda orijinal metin kalacak.")
+        kalan_sayi = sum(1 for i in eksik if i not in ceviriler)
+        if kalan_sayi:
+            self.log(f"   ⚠️ {kalan_sayi} satır yedek yoldan da çevrilemedi; "
+                     f"o satırlarda orijinal metin kalacak.")
+
+    def _yedek_tek_gecis(self, eksik, satirlar, kaynak_dil, ceviriler, kilit, durum, t_yedek):
+        """Yedek yolun tek turu: verilen satırları eşzamanlı olarak /m'den çevirir."""
+
         def bir_satir(i):
             if self.is_cancelled or durum["pes"]:
                 return i, None
@@ -1662,9 +1698,6 @@ class WhisperApp:
                 except Exception:
                     pass
 
-        if durum["pes"]:
-            self.log(f"   ⚠️ Yedek yol da arka arkaya {CEVIRI_LIMIT_ESIGI} kez başarısız oldu; "
-                     f"çeviri burada bırakıldı. Kalan satırlarda orijinal metin kalacak.")
 
     def _bloklara_dagit(self, cumle_gruplari, cumle_ceviriler, blok_metinleri, kaynak_dil):
         """Cümle çevirilerini geldikleri bloklara geri dağıtır; {blok: metin} döner.
@@ -1699,6 +1732,18 @@ class WhisperApp:
                     break
                 except Exception as e:
                     self._ceviri_son_hata = str(e)
+
+            # _grup_cevir YALNIZCA birincil uç noktayı kullanıyor. O yol kapalıyken
+            # (429 duvarı) anında düşüp hiçbir şey üretmiyordu ve bu bloklar sessizce
+            # orijinal diliyle kalıyordu -- "bazı cümleleri atlıyor" şikâyetinin
+            # sebebi buydu. Üstelik tam da düzeltmeye çalıştığımız parçalanmış
+            # cümlelere denk geliyor: Türkçe eklemeli bir dil olduğu için çeviri
+            # sık sık blok sayısından az kelime içeriyor ("I do not know why" ->
+            # "Bilmiyorum") ve dağıtım başarısız oluyor.
+            # Kalanları çalışan yedek yoldan (deep_translator /m) tek tek çeviriyoruz.
+            kalan = [i for i in yedek_bloklar if i not in blok_ceviriler]
+            if kalan and not self.is_cancelled:
+                self._yedek_yoldan_cevir(kalan, blok_metinleri, kaynak_dil, blok_ceviriler)
 
         return blok_ceviriler
 

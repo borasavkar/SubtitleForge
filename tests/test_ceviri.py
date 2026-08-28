@@ -713,6 +713,72 @@ def test_yedek_yol_pes_ediyor():
             sayac["n"] < 300, f"{sayac['n']} deneme")
 
 
+def test_dagitilamayan_grup_yedek_yoldan():
+    print("\n[28] Dağıtılamayan grup, birincil yol kapalıyken de çevriliyor")
+    # GERÇEK HATA: Türkçe eklemeli olduğu için çeviri sık sık blok sayısından az
+    # kelime içeriyor ("I do not know why." -> "Bilmiyorum"). O zaman dağıtım
+    # başarısız oluyor ve bloklar _grup_cevir'e düşüyordu; ama _grup_cevir yalnızca
+    # birincil uç noktayı kullanıyor. 429 duvarında hiçbir şey üretmiyor ve bloklar
+    # sessizce İngilizce kalıyordu.
+    uygulama, cev, oturum, gercek = uctan_uca_uygulama(lambda m, u, n: SahteYanit(429))
+    cev._fren_uygula = lambda s: None
+
+    def sahte_yedek(metin, kaynak, hedef="tr"):
+        # Cümlenin tamamı TEK kelimeye çevriliyor -> dağıtım imkânsız.
+        if metin == "I do not know why.":
+            return "Bilmiyorum"
+        return "YEDEK:" + metin
+
+    cev.cevir_yedek = sahte_yedek
+    try:
+        bloklar = [
+            {"start": 0.0, "end": 1.0, "text": "I do not"},
+            {"start": 1.0, "end": 2.0, "text": "know why."},
+        ]
+        ceviriler = uygulama._bloklari_cevir(bloklar, "en")
+    finally:
+        run.GoogleCevirici = gercek
+
+    kontrol("birincil yol kapandı", cev.limit_asildi, "")
+    kontrol("İKİ blok da çevrildi (hiçbiri atlanmadı)",
+            len(ceviriler) == 2, f"{len(ceviriler)}/2 -> {ceviriler}")
+    kontrol("bloklarda orijinal İngilizce kalmadı",
+            all(not str(ceviriler.get(i, "")).startswith(("I do not", "know why"))
+                for i in (0, 1)), str(ceviriler))
+    kontrol("çeviriler yedek yoldan geldi",
+            all(str(ceviriler.get(i, "")).startswith("YEDEK:") for i in (0, 1)),
+            str(ceviriler))
+
+
+def test_yedek_yol_tekrar_deniyor():
+    print("\n[29] Yedek yol geçici hatada tekrar deniyor")
+    # ÖLÇÜLEN GERÇEK DAVRANIŞ: /m uç noktası bazen tek tük satırı reddediyor
+    # (10 satırın 2'si bir turda düştü, sonraki turda sorunsuz geldi). Tek deneme
+    # yapılırsa o satır kalıcı olarak İngilizce kalıyordu.
+    uygulama, cev, oturum, gercek = uctan_uca_uygulama(lambda m, u, n: SahteYanit(429))
+    cev._fren_uygula = lambda s: None
+    gorulen = {}
+
+    def titrek_yedek(metin, kaynak, hedef="tr"):
+        gorulen[metin] = gorulen.get(metin, 0) + 1
+        return None if gorulen[metin] == 1 else "YEDEK:" + metin
+
+    cev.cevir_yedek = titrek_yedek
+    try:
+        bloklar = [{"start": i, "end": i + 1, "text": f"Line {i}."} for i in range(12)]
+        ceviriler = uygulama._bloklari_cevir(bloklar, "en")
+    finally:
+        run.GoogleCevirici = gercek
+
+    kontrol("ilk turda düşen satırlar sonraki turda kurtarıldı",
+            len(ceviriler) == 12, f"{len(ceviriler)}/12")
+    kontrol("hiçbir satırda orijinal İngilizce kalmadı",
+            all(str(ceviriler.get(i, "")).startswith("YEDEK:") for i in range(12)),
+            str({i: ceviriler.get(i) for i in range(12) if not str(ceviriler.get(i, "")).startswith("YEDEK:")}))
+    kontrol("her satır en az iki kez denendi",
+            all(v >= 2 for v in gorulen.values()), str(gorulen))
+
+
 for t in (test_satir_hizasi_korunuyor, test_eski_hata_yakalanirdi,
           test_bir_bozuk_satir_izole_ediliyor, test_429_freni,
           test_ag_hatasinda_bolunmuyor, test_noktalama_satirlari, test_gruplama,
@@ -723,7 +789,8 @@ for t in (test_satir_hizasi_korunuyor, test_eski_hata_yakalanirdi,
           test_cumle_gruplama, test_ceviri_dagitimi, test_uctan_uca_cumle_butunlugu,
           test_devre_kesici, test_devre_kesici_gecici_dalgalanma,
           test_uctan_uca_429_yedek_yol, test_yedek_yol_onarimdan_sonra,
-          test_yedek_yol_pes_ediyor):
+          test_yedek_yol_pes_ediyor, test_dagitilamayan_grup_yedek_yoldan,
+          test_yedek_yol_tekrar_deniyor):
     t()
 
 print("\n" + "=" * 60)
