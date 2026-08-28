@@ -598,6 +598,121 @@ def test_uctan_uca_cumle_butunlugu():
             repr(ceviriler.get(4)))
 
 
+def test_devre_kesici():
+    print("\n[23] Devre kesici: 429 fırtınasında birincil yol kapanıyor")
+    cev, oturum = cevirici_kur(lambda m, u, n: SahteYanit(429))
+    cev.bekle = lambda s: None
+    cev._fren_uygula = lambda s: None
+
+    kontrol("başlangıçta devre açık", not cev.limit_asildi)
+
+    for _ in range(30):
+        try:
+            cev.cevir("Hello", "en")
+        except run.CeviriHatasi:
+            pass
+        if cev.limit_asildi:
+            break
+    kontrol("eşik aşılınca devre kapandı", cev.limit_asildi, "")
+    kontrol("devre eşiğe yakın kapandı (istek patlamadı)",
+            len(oturum.istekler) <= run.CEVIRI_LIMIT_ESIGI + 9,
+            f"{len(oturum.istekler)} istek")
+
+    onceki = len(oturum.istekler)
+    for _ in range(20):
+        try:
+            cev.cevir("Hello", "en")
+        except run.CeviriHatasi:
+            pass
+    kontrol("devre kapalıyken HİÇ istek atılmıyor (anında düşüyor)",
+            len(oturum.istekler) == onceki, f"{len(oturum.istekler) - onceki} ek istek")
+
+
+def test_devre_kesici_gecici_dalgalanma():
+    print("\n[24] Geçici 429 dalgası devreyi açmıyor")
+    durum = {"n": 0}
+
+    def davranis(m, u, n):
+        durum["n"] += 1
+        return cumleler_yaniti(m) if durum["n"] % 4 == 0 else SahteYanit(429)
+
+    cev, oturum = cevirici_kur(davranis)
+    cev.bekle = lambda s: None
+    cev._fren_uygula = lambda s: None
+    for _ in range(40):
+        try:
+            cev.cevir("Hello", "en")
+        except run.CeviriHatasi:
+            pass
+    kontrol("araya başarı girdiği için devre açık kaldı", not cev.limit_asildi, "")
+    kontrol("başarılı istekler sayıldı", cev.basarili_istek > 0, str(cev.basarili_istek))
+
+
+def test_uctan_uca_429_yedek_yol():
+    print("\n[25] Uçtan uca: birincil yol 429, iş yedek yoldan bitiyor")
+    # Kullanıcının yaşadığı senaryonun birebir taklidi: üç birincil uç nokta da
+    # 429 veriyor, deep_translator'ın /m yolu ise çalışıyor.
+    uygulama, cev, oturum, gercek = uctan_uca_uygulama(lambda m, u, n: SahteYanit(429))
+    cev._fren_uygula = lambda s: None
+    cev.cevir_yedek = lambda metin, kaynak, hedef="tr": "YEDEK:" + metin
+    try:
+        bloklar = [{"start": i, "end": i + 1, "text": f"Line {i}."} for i in range(120)]
+        ceviriler = uygulama._bloklari_cevir(bloklar, "en")
+    finally:
+        run.GoogleCevirici = gercek
+
+    kontrol("devre kesici kapandı", cev.limit_asildi, "")
+    kontrol("120 satırın tamamı çevrildi", len(ceviriler) == 120, f"{len(ceviriler)}")
+    yanlis = [i for i in range(120) if ceviriler.get(i) != f"YEDEK:Line {i}."]
+    kontrol("hiçbir satır kaymadı", not yanlis, str(yanlis[:5]))
+    # Eski davranış: 120 satır x 9 istek x 3 onarım turu = binlerce istek + frenler.
+    kontrol("ölü uç noktaya atılan istek sınırlı kaldı",
+            len(oturum.istekler) < 200, f"{len(oturum.istekler)} istek")
+
+
+def test_yedek_yol_onarimdan_sonra():
+    print("\n[26] Onarım turları yetmezse yedek yol kalanları kurtarıyor")
+    # Ağ hatası (429 DEĞİL): devre kesici açılmamalı, onarım turları dönmeli,
+    # sonra kalanlar yedek yoldan gelmeli.
+    def davranis(m, u, n):
+        raise OSError("bağlantı koptu")
+
+    uygulama, cev, oturum, gercek = uctan_uca_uygulama(davranis)
+    cev.cevir_yedek = lambda metin, kaynak, hedef="tr": "YEDEK:" + metin
+    try:
+        bloklar = [{"start": i, "end": i + 1, "text": f"Line {i}."} for i in range(20)]
+        ceviriler = uygulama._bloklari_cevir(bloklar, "en")
+    finally:
+        run.GoogleCevirici = gercek
+
+    kontrol("ağ hatası devre kesiciyi açmadı", not cev.limit_asildi)
+    kontrol("20 satır yedek yoldan kurtarıldı", len(ceviriler) == 20, f"{len(ceviriler)}")
+    kontrol("metinler doğru eşleşti",
+            all(ceviriler.get(i) == f"YEDEK:Line {i}." for i in range(20)), "")
+
+
+def test_yedek_yol_pes_ediyor():
+    print("\n[27] Yedek yol da ölüyse sonsuza kadar denenmiyor")
+    uygulama, cev, oturum, gercek = uctan_uca_uygulama(lambda m, u, n: SahteYanit(429))
+    cev._fren_uygula = lambda s: None
+    sayac = {"n": 0}
+
+    def olu_yedek(metin, kaynak, hedef="tr"):
+        sayac["n"] += 1
+        return None
+
+    cev.cevir_yedek = olu_yedek
+    try:
+        bloklar = [{"start": i, "end": i + 1, "text": f"Line {i}."} for i in range(300)]
+        ceviriler = uygulama._bloklari_cevir(bloklar, "en")
+    finally:
+        run.GoogleCevirici = gercek
+
+    kontrol("hiçbir çeviri yok ama çökme de yok", ceviriler == {}, str(len(ceviriler)))
+    kontrol("yedek yol 300 satırı denemeden pes etti",
+            sayac["n"] < 300, f"{sayac['n']} deneme")
+
+
 for t in (test_satir_hizasi_korunuyor, test_eski_hata_yakalanirdi,
           test_bir_bozuk_satir_izole_ediliyor, test_429_freni,
           test_ag_hatasinda_bolunmuyor, test_noktalama_satirlari, test_gruplama,
@@ -605,7 +720,10 @@ for t in (test_satir_hizasi_korunuyor, test_eski_hata_yakalanirdi,
           test_sansur_onarimi, test_istem_secimi, test_istem_ayarlama,
           test_liste_yaniti, test_tekrar_filtresi,
           test_uctan_uca_onarim, test_uctan_uca_kalici_hata, test_uctan_uca_iptal,
-          test_cumle_gruplama, test_ceviri_dagitimi, test_uctan_uca_cumle_butunlugu):
+          test_cumle_gruplama, test_ceviri_dagitimi, test_uctan_uca_cumle_butunlugu,
+          test_devre_kesici, test_devre_kesici_gecici_dalgalanma,
+          test_uctan_uca_429_yedek_yol, test_yedek_yol_onarimdan_sonra,
+          test_yedek_yol_pes_ediyor):
     t()
 
 print("\n" + "=" * 60)

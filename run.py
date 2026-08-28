@@ -131,6 +131,26 @@ CEVIRI_ISCI_SAYISI = 3       # eşzamanlı istek sayısı (429 görülünce heps
 CEVIRI_ZAMAN_ASIMI = 25      # tek istek için saniye
 CEVIRI_ONARIM_TURU = 3       # ana geçişten sonra kaç kez "eksik satır" turu atılacak
 
+# --- BİRİNCİL UÇ NOKTA DEVRE KESİCİSİ ---
+# translate_a/single bazen bu IP'ye topluca 429 vermeye başlıyor ve saatlerce
+# açılmıyor (ölçüldü: üç uç noktanın üçü de 429, aynı anda deep_translator'ın /m
+# yolu sorunsuz çeviriyordu). Eskiden kod bunu fark etmiyordu: HER satır için
+# 3 tur x 3 uç nokta = 9 beyhude istek atıyor, her 429'da 6-11 sn küresel fren
+# uyguluyor, ancak ondan sonra çalışan yedek yola geçiyordu. 450 satırlık bir
+# filmde bu saatlere çıkıyor, uygulama "takıldı" gibi görünüyor ve sonunda hiçbir
+# satır çevrilmemiş oluyordu.
+# Artık arka arkaya bu kadar limit yanıtı gelince birincil yol kapatılıyor ve
+# istekler anında düşüyor. Araya BİR başarılı istek girerse sayaç sıfırlanıyor,
+# yani geçici dalgalanma devreyi açmıyor.
+CEVIRI_LIMIT_ESIGI = 18      # arka arkaya bu kadar 429/503 -> birincil yol kapanır
+# Hızlı karar: bir tam cevir() turu (3 uç nokta x 3 deneme) HİÇ başarılı istek
+# olmadan tükenmişse üç ayrı Google sunucusu da bizi reddediyor demektir; yol
+# gerçekten kapalı. 18 ardışık limiti beklemek her 429'da 6-11 sn fren yediği
+# için ~2,5 dakika boşa gidiyordu. Tek bir istek bile başarılı olmuşsa bu kural
+# devreye girmiyor, tam eşik (CEVIRI_LIMIT_ESIGI) aranıyor.
+CEVIRI_LIMIT_HIZLI = 9       # hiç başarı yokken bu kadar istek -> yol kapalı sayılır
+CEVIRI_YEDEK_ISCI = 3        # yedek yolda eşzamanlı istek (satır satır gidiyor)
+
 # Aynı istek birden fazla ana üzerinden denenebiliyor: biri 429 verse bile
 # diğerlerinden satır kurtarılabiliyor. Üçü de aynı JSON biçimini döndürüyor.
 CEVIRI_UC_NOKTALARI = (
@@ -257,6 +277,11 @@ class GoogleCevirici:
         self._kilit = threading.Lock()
         self._fren_bitisi = 0.0
         self.istek_sayisi = 0
+        self.basarili_istek = 0
+        # Devre kesici: arka arkaya gelen limit yanıtlarını sayıyor, bir başarıda
+        # sıfırlanıyor. Eşiği aşınca birincil uç nokta kapanıyor (bkz. CEVIRI_LIMIT_ESIGI).
+        self._ardisik_limit = 0
+        self.limit_asildi = False
 
     # -- altyapı ----------------------------------------------------------
 
@@ -338,9 +363,29 @@ class GoogleCevirici:
         if cevap.status_code in (429, 503):
             # Google hepimize kızdı: tek tek değil, topluca geri çekiliyoruz.
             self._fren_uygula(random.uniform(6.0, 11.0))
+            with self._kilit:
+                self._ardisik_limit += 1
+                sayi = self._ardisik_limit
+                # İki koşuldan biri yeterli (bkz. CEVIRI_LIMIT_HIZLI):
+                hicbir_basari = self.basarili_istek == 0 and self.istek_sayisi >= CEVIRI_LIMIT_HIZLI
+                kapat = sayi >= CEVIRI_LIMIT_ESIGI or hicbir_basari
+                yeni_kapandi = not self.limit_asildi and kapat
+                if yeni_kapandi:
+                    self.limit_asildi = True
+                    toplam = self.istek_sayisi
+            if yeni_kapandi:
+                self._log(f"   🚧 Birincil çeviri uç noktası istek limiti veriyor "
+                          f"({toplam} istek, {sayi} ardışık, hiç yanıt yok); "
+                          f"bu yol kapatılıyor, yedek yola geçilecek.")
             raise CeviriHatasi(f"HTTP {cevap.status_code} (istek limiti)")
         if cevap.status_code != 200:
             raise CeviriHatasi(f"HTTP {cevap.status_code}")
+
+        # Uç nokta yanıt verdi: devre kesici sayacı sıfırlanıyor. (200 dönüp boş
+        # çeviri gelmesi bir limit sorunu değil, o yüzden burada sıfırlıyoruz.)
+        with self._kilit:
+            self.basarili_istek += 1
+            self._ardisik_limit = 0
 
         try:
             veri = cevap.json()
@@ -357,6 +402,10 @@ class GoogleCevirici:
     def cevir(self, metin, kaynak, hedef="tr", tur_sayisi=3):
         """Metni çevirip düz metin döner. Satır sonları korunur.
         Kalıcı başarısızlıkta CeviriHatasi fırlatır."""
+        if self.limit_asildi:
+            # Devre kapalı: 9 beyhude istek atıp aralarında 6-11 sn fren beklemek
+            # yerine anında düşüyoruz. Çağıran taraf yedek yola geçiyor.
+            raise CeviriHatasi("birincil uç nokta istek limitinde (devre kapalı)")
         son_hata = None
         for tur in range(tur_sayisi):
             for uc_nokta in CEVIRI_UC_NOKTALARI:
@@ -1419,9 +1468,14 @@ class WhisperApp:
 
                 tamamlanan += 1
                 yuzde = tamamlanan * 100 / len(gruplar)
-                self.ilerleme(yuzde, f"Çeviri: %{yuzde:.0f} ({tamamlanan}/{len(gruplar)} paket)")
+                # Paket SAYISI denemeyi ölçüyor, başarıyı değil: uç nokta her pakete
+                # 429 verdiğinde ekranda "%100 (12/12 paket)" yazıp tek satır bile
+                # çevrilmemiş olabiliyordu. Gerçek çeviri sayısını da gösteriyoruz.
+                cevrilen = sum(1 for i in cevrilecek if i in ceviriler)
+                self.ilerleme(yuzde, f"Çeviri: %{yuzde:.0f} ({cevrilen}/{len(cevrilecek)} cümle)")
                 if tamamlanan % 5 == 0 or tamamlanan == len(gruplar):
                     self.log(f"   🌐 Çeviri: %{yuzde:.0f}  ({tamamlanan}/{len(gruplar)} paket, "
+                             f"{cevrilen}/{len(cevrilecek)} cümle çevrildi, "
                              f"{self._sure_metni(time.time() - t_ceviri)})")
 
                 if self.is_cancelled:
@@ -1451,6 +1505,15 @@ class WhisperApp:
             if not eksik:
                 break
 
+            # ERKEN ÇIKIŞ: birincil uç nokta topluca limit veriyorsa onarım turu
+            # aynı duvara tekrar tekrar toslar. Ölçülen bir çalıştırmada 3 tur x 45
+            # grup sırayla dönüp saatler harcamış, tek satır bile kurtaramamıştı.
+            # Doğrudan yedek yola geçiyoruz.
+            if self._cevirici.limit_asildi:
+                self.log("   ⏭️ Birincil uç nokta istek limitinde; onarım turları atlanıyor, "
+                         "kalan satırlar yedek yoldan çevrilecek.")
+                break
+
             self.log(f"   🔁 Onarım turu {tur}/{CEVIRI_ONARIM_TURU}: {len(eksik)} satır tekrar deneniyor...")
             try:
                 # Limit yediysek bir soluklanma; her turda biraz daha uzun.
@@ -1458,32 +1521,150 @@ class WhisperApp:
             except KullaniciIptali:
                 break
 
+            # Onarım turu eskiden SIRAYLA dönüyordu; ana geçiş 3 işçi kullanırken
+            # burada tek iş parçacığı vardı. Birkaç satır düştüğünde fark etmiyordu
+            # ama her şey düştüğünde (429 fırtınası) dakikalar yerine saatler sürüyordu.
             kucuk_gruplar = [eksik[j:j + 10] for j in range(0, len(eksik), 10)]
-            for sira, kucuk in enumerate(kucuk_gruplar, 1):
-                if self.is_cancelled:
-                    break
-                try:
-                    self._grup_cevir(kucuk, satirlar, kaynak_dil, ceviriler)
-                except KullaniciIptali:
-                    break
-                except Exception as e:
-                    self._ceviri_son_hata = str(e)
-                yuzde = sira * 100 / len(kucuk_gruplar)
-                self.ilerleme(yuzde, f"Çeviri onarımı {tur}: %{yuzde:.0f} ({sira}/{len(kucuk_gruplar)})")
+
+            def onarim_isi(kucuk):
+                # Ana geçişteki gibi YEREL sözlüğe yazıp sonra birleştiriyoruz:
+                # paylaşılan sözlüğe birden fazla iş parçacığından yazmıyoruz.
+                yerel = {}
+                self._grup_cevir(kucuk, satirlar, kaynak_dil, yerel)
+                return yerel
+
+            tamam = 0
+            onarim_havuzu = ThreadPoolExecutor(max_workers=CEVIRI_ISCI_SAYISI)
+            onarim_isleri = []
+            try:
+                onarim_isleri = [onarim_havuzu.submit(onarim_isi, k) for k in kucuk_gruplar]
+                for onarim in as_completed(onarim_isleri):
+                    try:
+                        ceviriler.update(onarim.result())
+                    except KullaniciIptali:
+                        pass
+                    except Exception as e:
+                        self._ceviri_son_hata = str(e)
+                    tamam += 1
+                    yuzde = tamam * 100 / len(kucuk_gruplar)
+                    self.ilerleme(yuzde, f"Çeviri onarımı {tur}: %{yuzde:.0f} "
+                                         f"({tamam}/{len(kucuk_gruplar)} grup)")
+                    if self.is_cancelled:
+                        for bekleyen in onarim_isleri:
+                            bekleyen.cancel()
+                        break
+            finally:
+                onarim_havuzu.shutdown(wait=True)
+
+            # İptalde/erken çıkışta okunmadan kalan sonuçlar da toplanıyor.
+            for bekleyen in onarim_isleri:
+                if bekleyen.done() and not bekleyen.cancelled():
+                    try:
+                        ceviriler.update(bekleyen.result())
+                    except Exception:
+                        pass
+
+        # --- YEDEK YOL ---
+        # Birincil uç nokta kapandıysa (ya da onarım turları yetmediyse) kalan
+        # satırlar deep_translator'ın /m uç noktasından tek tek çevriliyor. O yol
+        # satır sonlarını sildiği için toplu gönderilemiyor, ama eşzamanlı
+        # çalıştırınca 450 satır birkaç dakikada bitiyor -- saatler yerine.
+        kalan = [i for i in cevrilecek if i not in ceviriler]
+        if kalan and not self.is_cancelled:
+            self._yedek_yoldan_cevir(kalan, satirlar, kaynak_dil, ceviriler)
 
         # --- SANSÜR DENETİMİ ---
-        if self.uncensored.get() and not self.is_cancelled:
+        # Birincil uç nokta kapalıysa atlanıyor: sansürü kaldıran tek yol o uç nokta
+        # (yedek /m yolu küfürleri yıldızlıyor), kapalıyken denemek boşuna.
+        if self._cevirici.limit_asildi:
+            pass
+        elif self.uncensored.get() and not self.is_cancelled:
             try:
                 self._sansuru_onar(ceviriler, satirlar, kaynak_dil)
             except KullaniciIptali:
                 pass
 
         basarili = sum(1 for i in cevrilecek if i in ceviriler)
+        if self._cevirici.limit_asildi:
+            self.log("   🚫 Google'ın birincil çeviri uç noktası bu IP'ye istek limiti uyguladı "
+                     "(HTTP 429). Genellikle 30-60 dakika içinde açılıyor.")
         self.log(f"   📊 {basarili}/{len(cevrilecek)} cümle çevrildi "
                  f"({self._cevirici.istek_sayisi} istek, {self._sure_metni(time.time() - t_ceviri)}).")
 
         # --- ÇEVİRİYİ BLOKLARA GERİ DAĞIT ---
         return self._bloklara_dagit(cumle_gruplari, ceviriler, blok_metinleri, kaynak_dil)
+
+    def _yedek_yoldan_cevir(self, eksik, satirlar, kaynak_dil, ceviriler):
+        """Kalan satırları deep_translator'ın /m uç noktasından TEK TEK çevirir.
+
+        Birincil uç nokta (translate_a/single) bu IP'ye topluca 429 vermeye
+        başladığında çalışan tek yol bu -- ölçüldü: üç birincil uç nokta da 429
+        verirken /m sorunsuz çeviriyordu. O yol satır sonlarını sildiği için toplu
+        gönderilemiyor; onun yerine eşzamanlı çalıştırıyoruz, 450 satır birkaç
+        dakikada bitiyor.
+
+        Arka arkaya CEVIRI_LIMIT_ESIGI kadar başarısızlık gelirse bu yol da
+        kapanmış demektir; boşuna sürdürmek yerine bırakılıyor."""
+        self.log(f"   🛟 Yedek yol: {len(eksik)} satır tek tek çevriliyor "
+                 f"({CEVIRI_YEDEK_ISCI} eşzamanlı istek)...")
+        t_yedek = time.time()
+        kilit = threading.Lock()
+        durum = {"ardisik_hata": 0, "pes": False}
+
+        def bir_satir(i):
+            if self.is_cancelled or durum["pes"]:
+                return i, None
+            try:
+                ceviri = self._cevirici.cevir_yedek(satirlar[i], kaynak_dil)
+            except Exception:
+                ceviri = None
+            with kilit:
+                if ceviri:
+                    durum["ardisik_hata"] = 0
+                else:
+                    durum["ardisik_hata"] += 1
+                    if durum["ardisik_hata"] >= CEVIRI_LIMIT_ESIGI:
+                        durum["pes"] = True
+            return i, ceviri
+
+        tamam = 0
+        havuz = ThreadPoolExecutor(max_workers=CEVIRI_YEDEK_ISCI)
+        isler = []
+        try:
+            isler = [havuz.submit(bir_satir, i) for i in eksik]
+            for is_sonucu in as_completed(isler):
+                try:
+                    indeks, ceviri = is_sonucu.result()
+                    if ceviri:
+                        ceviriler[indeks] = ceviri
+                except Exception as e:
+                    self._ceviri_son_hata = str(e)
+                tamam += 1
+                yuzde = tamam * 100 / len(eksik)
+                self.ilerleme(yuzde, f"Yedek çeviri: %{yuzde:.0f} ({tamam}/{len(eksik)} satır)")
+                if tamam % 50 == 0 or tamam == len(eksik):
+                    self.log(f"   🛟 Yedek yol: {tamam}/{len(eksik)} satır "
+                             f"({self._sure_metni(time.time() - t_yedek)})")
+                if self.is_cancelled or durum["pes"]:
+                    for bekleyen in isler:
+                        bekleyen.cancel()
+                    break
+        finally:
+            havuz.shutdown(wait=True)
+
+        # Kuyruk boşaltılırken biten ama okunmayan sonuçlar çöpe gitmesin.
+        for bekleyen in isler:
+            if bekleyen.done() and not bekleyen.cancelled():
+                try:
+                    indeks, ceviri = bekleyen.result()
+                    if ceviri:
+                        ceviriler[indeks] = ceviri
+                except Exception:
+                    pass
+
+        if durum["pes"]:
+            self.log(f"   ⚠️ Yedek yol da arka arkaya {CEVIRI_LIMIT_ESIGI} kez başarısız oldu; "
+                     f"çeviri burada bırakıldı. Kalan satırlarda orijinal metin kalacak.")
 
     def _bloklara_dagit(self, cumle_gruplari, cumle_ceviriler, blok_metinleri, kaynak_dil):
         """Cümle çevirilerini geldikleri bloklara geri dağıtır; {blok: metin} döner.
