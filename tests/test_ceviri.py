@@ -476,13 +476,136 @@ def test_uctan_uca_iptal():
     kontrol("kısmi sonuçta da hiçbir satır kaymadı", not yanlis, str(yanlis[:5]))
 
 
+def test_cumle_gruplama():
+    print("\n[20] Cümle grupları (çeviri birimi blok değil cümle)")
+    uygulama = run.WhisperApp.__new__(run.WhisperApp)
+
+    def grupla(bloklar):
+        return list(uygulama._cumle_gruplari(bloklar))
+
+    # Bölücünün 75 karakterde parçaladığı TEK bir cümle.
+    parcali = [
+        {"start": 0.0, "end": 1.0, "text": "I never"},
+        {"start": 1.0, "end": 3.0, "text": "understood why she chose to leave the city"},
+        {"start": 3.0, "end": 4.5, "text": "without telling anyone."},
+    ]
+    kontrol("parçalanmış cümle tek grupta birleşti",
+            grupla(parcali) == [[0, 1, 2]], str(grupla(parcali)))
+
+    # Uzun sessizlik yeni repliktir; cümle bitmese bile ayrılmalı.
+    sessizlikli = [
+        {"start": 0.0, "end": 1.0, "text": "I never"},
+        {"start": 30.0, "end": 31.0, "text": "understood why."},
+    ]
+    kontrol("uzun sessizlik replikleri ayırdı",
+            grupla(sessizlikli) == [[0], [1]], str(grupla(sessizlikli)))
+
+    # Nota/noktalama satırları konuşmaya karışmamalı.
+    notali = [
+        {"start": 0.0, "end": 1.0, "text": "♪"},
+        {"start": 1.0, "end": 2.0, "text": "I never"},
+        {"start": 2.0, "end": 3.0, "text": "understood."},
+    ]
+    kontrol("'♪' kendi grubunda kaldı", grupla(notali) == [[0], [1, 2]], str(grupla(notali)))
+
+    # Noktalama hiç gelmezse grup sonsuza kadar büyümemeli.
+    noktasiz = [{"start": float(i), "end": i + 1.0, "text": "kelime"} for i in range(30)]
+    gruplar = grupla(noktasiz)
+    kontrol("noktalama yoksa blok sınırı devrede",
+            all(len(g) <= run.CUMLE_MAX_BLOK for g in gruplar), str([len(g) for g in gruplar]))
+    kontrol("karakter sınırı devrede",
+            all(sum(len(noktasiz[i]["text"]) + 1 for i in g) <= run.CUMLE_MAX_KARAKTER
+                or len(g) == 1 for g in gruplar))
+
+    # Hiçbir blok kaybolmamalı, sıra bozulmamalı (SRT satırı kaybı kabul edilemez).
+    karisik = parcali + notali + noktasiz
+    for i, b in enumerate(karisik):
+        b["start"], b["end"] = float(i), i + 1.0
+    duz = [i for g in grupla(karisik) for i in g]
+    kontrol("hiçbir blok kaybolmadı / tekrarlamadı",
+            duz == list(range(len(karisik))), str(duz))
+
+    tirnakli = [{"start": 0.0, "end": 1.0, "text": '"Bitti."'},
+                {"start": 1.0, "end": 2.0, "text": "Yeni cümle."}]
+    kontrol("kapanış tırnağı cümle sonunu gizlemiyor",
+            grupla(tirnakli) == [[0], [1]], str(grupla(tirnakli)))
+
+    uc_nokta = [{"start": 0.0, "end": 1.0, "text": "Bekle…"},
+                {"start": 1.0, "end": 2.0, "text": "Sonra gitti."}]
+    kontrol("'…' cümle sonu sayılıyor", grupla(uc_nokta) == [[0], [1]], str(grupla(uc_nokta)))
+
+
+def test_ceviri_dagitimi():
+    print("\n[21] Çevirinin bloklara geri dağıtılması")
+    uygulama = run.WhisperApp.__new__(run.WhisperApp)
+    D = uygulama._ceviriyi_dagit
+
+    kontrol("tek blok tam çeviriyi alır",
+            D("Merhaba dünya.", ["Hello world."]) == ["Merhaba dünya."])
+
+    d = D("bir iki uc dort bes alti", ["ab", "abcde", "ab"])
+    kontrol("3 blok / 6 kelime dağıtıldı", d is not None and len(d) == 3, str(d))
+    kontrol("boş satır üretilmedi", bool(d) and all(p.strip() for p in d), str(d))
+    kontrol("kelime kaybı/tekrarı yok",
+            bool(d) and " ".join(d) == "bir iki uc dort bes alti", str(d))
+
+    d3 = D("bir iki uc", ["ab", "abcde", "ab"])
+    kontrol("3 blok / 3 kelime → birer kelime", d3 == ["bir", "iki", "uc"], str(d3))
+
+    kontrol("3 blok / 2 kelime → None (blok blok çeviriye düşer)",
+            D("bir iki", ["ab", "abcde", "ab"]) is None)
+
+    d5 = D("a b c d e", ["x", "x", "x", "x", "x"])
+    kontrol("5 blok / 5 kelime → boş satır yok", d5 == ["a", "b", "c", "d", "e"], str(d5))
+
+    d_oran = D(" ".join(str(i) for i in range(10)), ["a", "a" * 50])
+    kontrol("uzun bloğa daha çok kelime düştü",
+            bool(d_oran) and len(d_oran[1].split()) > len(d_oran[0].split()), str(d_oran))
+
+    kontrol("boş çeviri None döner", D("", ["ab", "cd"]) is None)
+
+
+def test_uctan_uca_cumle_butunlugu():
+    print("\n[22] Uçtan uca: cümle bütün halde çevrilip bloklara dağıtılıyor")
+    uygulama, cev, oturum, gercek = uctan_uca_uygulama(lambda m, u, n: cumleler_yaniti(m))
+    try:
+        bloklar = [
+            {"start": 0.0, "end": 1.0, "text": "I never"},
+            {"start": 1.0, "end": 3.0, "text": "understood why she chose to leave the city"},
+            {"start": 3.0, "end": 4.5, "text": "without telling anyone."},
+            {"start": 40.0, "end": 41.0, "text": "♪"},
+            {"start": 41.0, "end": 43.0, "text": "She came back."},
+        ]
+        ceviriler = uygulama._bloklari_cevir(bloklar, "en")
+    finally:
+        run.GoogleCevirici = gercek
+
+    kontrol("her blok bir çeviri aldı", len(ceviriler) == 5, str(sorted(ceviriler)))
+    kontrol("boş altyazı satırı üretilmedi",
+            all(str(ceviriler[i]).strip() for i in ceviriler), str(ceviriler))
+    kontrol("'♪' olduğu gibi kaldı", ceviriler.get(3) == "♪", repr(ceviriler.get(3)))
+
+    gonderilen = " || ".join(m for _, m in oturum.istekler)
+    kontrol("cümle Google'a BÜTÜN gönderildi (parça parça değil)",
+            "I never understood why she chose to leave the city without telling anyone."
+            in gonderilen, gonderilen)
+
+    birlesik = " ".join(ceviriler[i] for i in (0, 1, 2))
+    kontrol("cümlenin çevirisi 3 bloğa eksiksiz dağıtıldı",
+            birlesik == ("TR:I never understood why she chose to leave the city "
+                         "without telling anyone."), birlesik)
+    kontrol("ayrı replik ayrı çevrildi", ceviriler.get(4) == "TR:She came back.",
+            repr(ceviriler.get(4)))
+
+
 for t in (test_satir_hizasi_korunuyor, test_eski_hata_yakalanirdi,
           test_bir_bozuk_satir_izole_ediliyor, test_429_freni,
           test_ag_hatasinda_bolunmuyor, test_noktalama_satirlari, test_gruplama,
           test_satir_kirma, test_zaman_duzeltme, test_srt_yazma, test_sansur_deseni,
           test_sansur_onarimi, test_istem_secimi, test_istem_ayarlama,
           test_liste_yaniti, test_tekrar_filtresi,
-          test_uctan_uca_onarim, test_uctan_uca_kalici_hata, test_uctan_uca_iptal):
+          test_uctan_uca_onarim, test_uctan_uca_kalici_hata, test_uctan_uca_iptal,
+          test_cumle_gruplama, test_ceviri_dagitimi, test_uctan_uca_cumle_butunlugu):
     t()
 
 print("\n" + "=" * 60)

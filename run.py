@@ -208,6 +208,20 @@ BLOK_MIN_KARAKTER = 25       # cümle bitse bile bu uzunluğun altında blok kap
 KELIME_ARASI_BOSLUK = 1.0    # bu kadar saniyelik sessizlik yeni blok başlatır
 SATIR_MAX_KARAKTER = 42      # dosyaya yazarken satır kırma sınırı (altyazı standardı)
 
+# --- CÜMLE BÜTÜNLÜĞÜ ---
+# Altyazı bölücüsü cümleleri karakter sınırında ve kelime boşluklarında kesiyor. Bu
+# parçalar tek başına çevrilince anlam bozuluyor:
+#   KAYNAK  : I never understood why she chose to leave the city without telling anyone.
+#   PARÇALI : asla | neden şehri terk etmeyi seçtiğini anladı | kimseye söylemeden.
+#   BÜTÜN   : Neden kimseye söylemeden şehri terk etmeyi seçtiğini hiç anlamadım.
+# "never" ayrı bloğa düştüğü için olumsuzluk kayboluyor ve anlam TERSİNE dönüyor.
+# Çözüm: çeviriyi cümle düzeyinde yapıp sonucu bloklara karakter oranına göre geri
+# dağıtmak. Aşağıdaki sınırlar, noktalama hiç gelmediğinde grubun sonsuza kadar
+# büyümesini engelliyor.
+CUMLE_MAX_BLOK = 8           # bir cümle grubuna girebilecek en fazla blok
+CUMLE_MAX_KARAKTER = 400     # bir cümle grubunun en fazla karakteri
+CUMLE_MAX_BOSLUK = 2.0       # iki blok arası bu kadar saniyeden uzun sessizlik varsa ayır
+
 
 class KullaniciIptali(Exception):
     """İptal butonuna basıldığında whisperx'in içinden çıkmak için kullanılıyor.
@@ -1188,6 +1202,84 @@ class WhisperApp:
         if grup:
             yield grup
 
+    def _cumle_gruplari(self, bloklar):
+        """Ardışık blokları cümle bütünlüğüne göre gruplar; blok indeks listeleri üretir.
+
+        Blok kurucu (`_bloklari_kur`) cümleyi 75 karakterde ve kelimeler arası 1 sn
+        sessizlikte kesiyor. Ortaya çıkan parça tek başına çevrilince anlam bozuluyor
+        (bkz. CUMLE_MAX_BLOK yanındaki not), bu yüzden çeviri birimi blok değil cümle.
+        Zamanlamalara ve blok yapısına dokunulmuyor; yalnızca hangi blokların birlikte
+        çevrileceği belirleniyor."""
+        grup = []
+        uzunluk = 0
+        onceki_bit = None
+
+        for i, blok in enumerate(bloklar):
+            metin = " ".join((blok.get("text") or "").split())
+
+            # "♪", "...", "- -" gibi satırlar zaten çeviriye gitmiyor
+            # (bkz. _cevrilmeye_deger). Cümleye karıştırılırlarsa geri dağıtım
+            # sırasında konuşmanın içine sızıyorlar; kendi gruplarında bırakılıyorlar.
+            if not self._cevrilmeye_deger(metin):
+                if grup:
+                    yield grup
+                    grup, uzunluk = [], 0
+                yield [i]
+                onceki_bit = blok["end"]
+                continue
+
+            # Uzun sessizlik varsa yeni bir replik başlamıştır; öncekiyle birleştirme.
+            if (grup and onceki_bit is not None
+                    and (blok["start"] - onceki_bit) > CUMLE_MAX_BOSLUK):
+                yield grup
+                grup, uzunluk = [], 0
+
+            grup.append(i)
+            uzunluk += len(metin) + 1
+            onceki_bit = blok["end"]
+
+            # Cümle bitti mi? Kapanış tırnak/parantezlerini kırpıp bakıyoruz.
+            # ("…" kırpılmıyor: kendisi bir cümle sonu işareti.)
+            son = metin.rstrip("\"'»)]}").rstrip()
+            cumle_bitti = son.endswith((".", "?", "!", "…", ":", "؟"))
+
+            if cumle_bitti or len(grup) >= CUMLE_MAX_BLOK or uzunluk >= CUMLE_MAX_KARAKTER:
+                yield grup
+                grup, uzunluk = [], 0
+
+        if grup:
+            yield grup
+
+    @staticmethod
+    def _ceviriyi_dagit(ceviri, orijinal_metinler):
+        """Bir cümlenin çevirisini, geldiği bloklara orijinal karakter oranına göre
+        kelime sınırlarından geri dağıtır. Zamanlamalar korunur.
+
+        Kelime sayısı blok sayısından azsa None döner -- o grup için çağıran taraf blok
+        blok çeviriye düşer, çünkü boş altyazı satırı bırakmak kabul edilemez."""
+        kelimeler = (ceviri or "").split()
+        n = len(orijinal_metinler)
+
+        if n == 1:
+            return [ceviri]
+        if len(kelimeler) < n:
+            return None
+
+        toplam = sum(len(m) for m in orijinal_metinler) or 1
+        sonuc = []
+        kalan = kelimeler
+
+        for i, metin in enumerate(orijinal_metinler):
+            if i == n - 1:
+                sonuc.append(" ".join(kalan))
+                break
+            adet = max(1, round(len(kelimeler) * len(metin) / toplam))
+            adet = min(adet, len(kalan) - (n - 1 - i))   # kalan bloklara en az birer kelime
+            sonuc.append(" ".join(kalan[:adet]))
+            kalan = kalan[adet:]
+
+        return sonuc
+
     @staticmethod
     def _cevrilmeye_deger(metin):
         """Sadece noktalama/nota işareti içeren satırlar ("...", "- -", "♪") çeviriye
@@ -1260,19 +1352,29 @@ class WhisperApp:
     def _bloklari_cevir(self, bloklar, kaynak_dil):
         """Altyazı bloklarını Türkçeye çevirir.
 
-        {indeks: çeviri} sözlüğü döner. Sözlükte yer almayan indeksler kalıcı olarak
-        çevrilememiş demektir; çağıran taraf o satırlarda orijinal metni bırakıyor.
+        {blok indeksi: çeviri} sözlüğü döner. Sözlükte yer almayan indeksler kalıcı
+        olarak çevrilememiş demektir; çağıran taraf o satırlarda orijinal metni bırakıyor.
 
-        Akış: paketleme → eşzamanlı çeviri → eksik kalanlar için onarım turları →
-        sansür denetimi. Onarım turları olmadan, geçici bir ağ/limit hatasına denk
-        gelen paketteki bütün satırlar sessizce çevrilmemiş kalıyordu."""
+        Çeviri birimi blok DEĞİL cümledir: bölücü cümleyi karakter sınırında kestiği
+        için parça parça çeviri anlamı bozuyordu (bkz. CUMLE_MAX_BLOK yanındaki not).
+        Bloklar cümlelere gruplanıp öyle çevriliyor, sonuç bloklara geri dağıtılıyor.
+
+        Akış: cümle gruplama → paketleme → eşzamanlı çeviri → eksik kalanlar için onarım
+        turları → sansür denetimi → bloklara geri dağıtma. Onarım turları olmadan,
+        geçici bir ağ/limit hatasına denk gelen paketteki bütün satırlar sessizce
+        çevrilmemiş kalıyordu."""
         self._cevirici = GoogleCevirici(iptal_kontrolu=lambda: self.is_cancelled, log=self.log)
         self._ceviri_son_hata = None
         t_ceviri = time.time()
 
         # Satır içi satır sonu paket hizasını bozar; blok kurucu üretmiyor ama
         # çeviriye giren metni yine de tek satıra indirgiyoruz.
-        satirlar = [" ".join((b.get("text") or "").split()) for b in bloklar]
+        blok_metinleri = [" ".join((b.get("text") or "").split()) for b in bloklar]
+
+        # Blokları cümle bütünlüğüne göre grupla; bundan sonrası CÜMLE indeksleriyle
+        # çalışıyor, blok indekslerine ancak en sonda geri dönülüyor.
+        cumle_gruplari = list(self._cumle_gruplari(bloklar))
+        satirlar = [" ".join(blok_metinleri[i] for i in grup) for grup in cumle_gruplari]
 
         # Yalnızca noktalama içeren satırları ("...", "♪", "- -") baştan ayırıyoruz:
         # Google bunları yutup paketten düşürüyor, satır hizası da kayıyordu.
@@ -1286,10 +1388,10 @@ class WhisperApp:
 
         gruplar = list(self._satir_gruplari(cevrilecek, satirlar))
         if not gruplar:
-            return ceviriler
+            return self._bloklara_dagit(cumle_gruplari, ceviriler, blok_metinleri, kaynak_dil)
 
-        self.log(f"   {len(cevrilecek)} satır, {len(gruplar)} pakette gönderilecek "
-                 f"({CEVIRI_ISCI_SAYISI} eşzamanlı istek).")
+        self.log(f"   {len(bloklar)} satır → {len(satirlar)} cümle; {len(cevrilecek)} cümle "
+                 f"{len(gruplar)} pakette gönderilecek ({CEVIRI_ISCI_SAYISI} eşzamanlı istek).")
 
         def grup_isi(grup):
             yerel = {}
@@ -1377,9 +1479,47 @@ class WhisperApp:
                 pass
 
         basarili = sum(1 for i in cevrilecek if i in ceviriler)
-        self.log(f"   📊 {basarili}/{len(cevrilecek)} satır çevrildi "
+        self.log(f"   📊 {basarili}/{len(cevrilecek)} cümle çevrildi "
                  f"({self._cevirici.istek_sayisi} istek, {self._sure_metni(time.time() - t_ceviri)}).")
-        return ceviriler
+
+        # --- ÇEVİRİYİ BLOKLARA GERİ DAĞIT ---
+        return self._bloklara_dagit(cumle_gruplari, ceviriler, blok_metinleri, kaynak_dil)
+
+    def _bloklara_dagit(self, cumle_gruplari, cumle_ceviriler, blok_metinleri, kaynak_dil):
+        """Cümle çevirilerini geldikleri bloklara geri dağıtır; {blok: metin} döner.
+
+        Çevirisi blok sayısından az kelime içeren gruplar dağıtılamıyor; onlar için eski
+        yönteme, blok blok çeviriye düşülüyor. Boş altyazı satırı bırakmak kabul edilemez."""
+        blok_ceviriler = {}
+        yedek_bloklar = []
+
+        for cumle_idx, grup in enumerate(cumle_gruplari):
+            ceviri = cumle_ceviriler.get(cumle_idx)
+            if ceviri is None:
+                continue                      # çevrilemedi → orijinal metin kalır
+
+            dagitim = self._ceviriyi_dagit(ceviri, [blok_metinleri[i] for i in grup])
+            if dagitim is None:
+                yedek_bloklar.extend(grup)
+                continue
+
+            for blok_idx, metin in zip(grup, dagitim):
+                blok_ceviriler[blok_idx] = metin
+
+        if yedek_bloklar and not self.is_cancelled:
+            self.log(f"   ↩️ {len(yedek_bloklar)} satır tek tek çevriliyor "
+                     f"(cümle çevirisi bloklara bölünemedi).")
+            for paket in self._satir_gruplari(yedek_bloklar, blok_metinleri):
+                if self.is_cancelled:
+                    break
+                try:
+                    self._grup_cevir(paket, blok_metinleri, kaynak_dil, blok_ceviriler)
+                except KullaniciIptali:
+                    break
+                except Exception as e:
+                    self._ceviri_son_hata = str(e)
+
+        return blok_ceviriler
 
     def _sansuru_onar(self, ceviriler, satirlar, kaynak_dil):
         """Yedek yoldan (deep_translator /m) gelen satırlarda küfürler bazen
