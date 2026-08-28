@@ -159,6 +159,21 @@ CEVIRI_YEDEK_TURU = 4        # yedek yolda eksik kalan satırlar kaç tur tekrar
 # nefes alıyor; toplam ek maliyet en kötü ihtimalle ~36 sn.
 CEVIRI_YEDEK_BEKLEME = 6.0   # tur başına saniye (tur 2 -> 6sn, tur 3 -> 12sn, ...)
 
+# --- ÜÇÜNCÜ BASAMAK: YEREL ÇEVİRİ ---
+# Google'ın iki uç noktası da istek limiti verdiğinde çalışan tek yol: makinede
+# koşan Opus-MT modeli. Kota yok, internet yok (model bir kez indikten sonra),
+# sansür yok -- yıldızlama yapamaz, çünkü ağa hiç çıkmıyor.
+# Ölçüldü: CPU'da 2,3 cümle/sn (450 cümlelik film ~3 dk); 10 cümlelik
+# karşılaştırmada kalite Google ile denk çıktı (4 birebir aynı, 2 Opus lehine,
+# 1 Google lehine). Deyimlerde ikisi de zayıf.
+# Türkçeye DOĞRUDAN model yalnızca İngilizceden var; diğer diller İngilizce
+# üzerinden aktarılıyor (iki model, bir miktar kalite kaybı).
+# Model HF önbelleğine iniyor; _model_klasoru_ayarla HF_HOME'u uygulamanın
+# yanındaki "models" klasörüne çevirdiği için modelleri_kopyala.ps1 onu da taşıyor.
+YEREL_MODEL_TR = "Helsinki-NLP/opus-mt-tc-big-en-tr"
+YEREL_KOPRU_KALIBI = "Helsinki-NLP/opus-mt-{dil}-en"
+YEREL_YIGIN = 16             # tek seferde modele verilecek cümle sayısı
+
 # Aynı istek birden fazla ana üzerinden denenebiliyor: biri 429 verse bile
 # diğerlerinden satır kurtarılabiliyor. Üçü de aynı JSON biçimini döndürüyor.
 CEVIRI_UC_NOKTALARI = (
@@ -441,6 +456,89 @@ class GoogleCevirici:
             return None
         sonuc = str(sonuc).strip()
         return sonuc or None
+
+
+class YerelCevirici:
+    """Üçüncü basamak: tamamen yerel Opus-MT çevirisi.
+
+    Google'ın hem translate_a/single hem /m yolu istek limiti verdiğinde devreye
+    giriyor. Ağa hiç çıkmadığı için kota, 429 ve sansür diye bir derdi yok.
+
+    Kullanılamıyorsa (kütüphane eksik, indirme başarısız, dil için model yok)
+    hazirla() False döner ve çağıran taraf sessizce atlar: yerel çeviri bir
+    iyileştirme, zorunluluk değil. Uygulamanın geri kalanı onsuz da çalışıyor."""
+
+    def __init__(self, log=None, iptal_kontrolu=None):
+        self._log = log or (lambda mesaj: None)
+        self._iptal = iptal_kontrolu or (lambda: False)
+        self._tr = None          # (tokenizer, model)  en -> tr
+        self._kopru = None       # (tokenizer, model)  XX -> en  (gerekiyorsa)
+        self._hazir = None       # None: denenmedi
+        self._torch = None
+
+    def hazirla(self, kaynak_dil):
+        """Modelleri yükler; sonucu saklayıp bir daha denemez."""
+        if self._hazir is not None:
+            return self._hazir
+        self._hazir = False
+
+        try:
+            import torch
+            from transformers import MarianMTModel, MarianTokenizer
+        except Exception as e:
+            self._log(f"   ℹ️ Yerel çeviri kullanılamıyor (kütüphane eksik: {e}).")
+            return False
+        self._torch = torch
+
+        dil = (kaynak_dil or "").lower().split("-")[0].split("_")[0]
+
+        def yukle(ad):
+            return MarianTokenizer.from_pretrained(ad), MarianMTModel.from_pretrained(ad)
+
+        try:
+            if dil in ("", "auto", "en"):
+                if dil != "en":
+                    self._log("   ℹ️ Kaynak dil kesin değil; yerel çeviri İngilizce varsayıyor.")
+                self._log("   ⬇️ Yerel çeviri modeli hazırlanıyor (en→tr). "
+                          "İlk seferde indirme birkaç dakika sürebilir...")
+            else:
+                self._log(f"   ⬇️ Yerel çeviri modeli hazırlanıyor ({dil}→en→tr). "
+                          f"İlk seferde indirme birkaç dakika sürebilir...")
+                self._kopru = yukle(YEREL_KOPRU_KALIBI.format(dil=dil))
+            self._tr = yukle(YEREL_MODEL_TR)
+        except Exception as e:
+            self._log(f"   ℹ️ Yerel çeviri kurulamadı ({e}); bu basamak atlanıyor.")
+            self._tr = self._kopru = None
+            return False
+
+        for ikili in (self._tr, self._kopru):
+            if ikili:
+                ikili[1].eval()
+        self._hazir = True
+        return True
+
+    def _gecir(self, ikili, metinler, ilerleme=None, taban=0.0, pay=1.0):
+        """Bir modeli yığın yığın çalıştırır."""
+        tokenlayici, model = ikili
+        cikti = []
+        for i in range(0, len(metinler), YEREL_YIGIN):
+            if self._iptal():
+                raise KullaniciIptali()
+            yigin = tokenlayici(metinler[i:i + YEREL_YIGIN], return_tensors="pt",
+                                padding=True, truncation=True, max_length=512)
+            with self._torch.no_grad():
+                uretilen = model.generate(**yigin, num_beams=4, max_new_tokens=256)
+            cikti += [tokenlayici.decode(c, skip_special_tokens=True) for c in uretilen]
+            if ilerleme:
+                ilerleme(taban + pay * min(1.0, (i + YEREL_YIGIN) / max(1, len(metinler))))
+        return cikti
+
+    def cevir_liste(self, metinler, ilerleme=None):
+        """Metin listesini Türkçeye çevirir; aynı sırada liste döner."""
+        if self._kopru:
+            ara = self._gecir(self._kopru, metinler, ilerleme, 0.0, 0.5)
+            return self._gecir(self._tr, ara, ilerleme, 0.5, 0.5)
+        return self._gecir(self._tr, metinler, ilerleme, 0.0, 1.0)
 
 
 class WhisperApp:
@@ -1581,6 +1679,13 @@ class WhisperApp:
         if kalan and not self.is_cancelled:
             self._yedek_yoldan_cevir(kalan, satirlar, kaynak_dil, ceviriler)
 
+        # --- ÜÇÜNCÜ BASAMAK: YEREL ÇEVİRİ ---
+        # Google'ın iki yolu da veremediyse makinede çeviriyoruz. Ağa çıkmadığı
+        # için kota/429 diye bir sorunu yok; tek bedeli süre.
+        kalan = [i for i in cevrilecek if i not in ceviriler]
+        if kalan and not self.is_cancelled:
+            self._yerelden_cevir(kalan, satirlar, kaynak_dil, ceviriler)
+
         # --- SANSÜR DENETİMİ ---
         # Birincil uç nokta kapalıysa atlanıyor: sansürü kaldıran tek yol o uç nokta
         # (yedek /m yolu küfürleri yıldızlıyor), kapalıyken denemek boşuna.
@@ -1618,6 +1723,7 @@ class WhisperApp:
         t_yedek = time.time()
         kilit = threading.Lock()
         durum = {"ardisik_hata": 0, "pes": False}
+        verimsiz = 0          # arka arkaya tek satır bile kurtaramayan tur sayısı
 
         for yedek_tur in range(1, CEVIRI_YEDEK_TURU + 1):
             bu_tur = [i for i in eksik if i not in ceviriler]
@@ -1633,8 +1739,24 @@ class WhisperApp:
                 # Yeni tur temiz sayfa: önceki turun hataları pes ettirmesin.
                 with kilit:
                     durum["ardisik_hata"] = 0
+            onceki = sum(1 for i in eksik if i in ceviriler)
             self._yedek_tek_gecis(bu_tur, satirlar, kaynak_dil, ceviriler,
                                   kilit, durum, t_yedek)
+            # Bir tur HİÇBİR satır kurtaramadıysa bu yol kapalı demektir; tekrar
+            # denemek sadece zaman yakıyor (ölçüldü: 4 tur x ~15 sn = 1 dakika,
+            # sıfır kazanç). Kısmi başarı varsa devam ediyoruz, çünkü /m tek tük
+            # satırı geçici reddedip sonraki turda veriyor.
+            if sum(1 for i in eksik if i in ceviriler) == onceki:
+                # Tek verimsiz tur yetmiyor: /m bazen bir turun TAMAMINI reddedip
+                # sonrakinde sorunsuz veriyor. Ama arka arkaya iki tur hiçbir şey
+                # getirmiyorsa yol kapalı demektir; kalan turları harcamıyoruz.
+                verimsiz += 1
+                if verimsiz >= 2:
+                    self.log("   ⏭️ Yedek yol arka arkaya iki turda hiçbir satır "
+                             "çeviremedi; kalan turlar atlanıyor.")
+                    break
+            else:
+                verimsiz = 0
 
         if durum["pes"]:
             self.log(f"   ⚠️ Yedek yol da arka arkaya {CEVIRI_LIMIT_ESIGI} kez başarısız oldu; "
@@ -1699,6 +1821,40 @@ class WhisperApp:
                     pass
 
 
+    def _yerelden_cevir(self, eksik, satirlar, kaynak_dil, ceviriler):
+        """Kalan satırları makinedeki Opus-MT modeliyle çevirir (üçüncü basamak).
+
+        Google'ın iki uç noktası da istek limiti verdiğinde çalışan tek yol bu.
+        Model yoksa/yüklenemezse sessizce dönülüyor: yerel çeviri bir iyileştirme,
+        zorunluluk değil."""
+        if getattr(self, "_yerel", None) is None:
+            self._yerel = YerelCevirici(log=self.log,
+                                        iptal_kontrolu=lambda: self.is_cancelled)
+        if not self._yerel.hazirla(kaynak_dil):
+            return
+
+        self.log(f"   💻 Yerel çeviri: {len(eksik)} satır makinede çevriliyor "
+                 f"(internet gerekmiyor)...")
+        t_yerel = time.time()
+        try:
+            sonuclar = self._yerel.cevir_liste(
+                [satirlar[i] for i in eksik],
+                ilerleme=lambda o: self.ilerleme(o * 100, f"Yerel çeviri: %{o * 100:.0f}"))
+        except KullaniciIptali:
+            return
+        except Exception as e:
+            self._ceviri_son_hata = str(e)
+            self.log(f"   ⚠️ Yerel çeviri hata verdi ({e}); atlanıyor.")
+            return
+
+        eklenen = 0
+        for i, ceviri in zip(eksik, sonuclar):
+            if ceviri and ceviri.strip():
+                ceviriler[i] = ceviri.strip()
+                eklenen += 1
+        self.log(f"   💻 Yerel çeviri: {eklenen}/{len(eksik)} satır çevrildi "
+                 f"({self._sure_metni(time.time() - t_yerel)}).")
+
     def _bloklara_dagit(self, cumle_gruplari, cumle_ceviriler, blok_metinleri, kaynak_dil):
         """Cümle çevirilerini geldikleri bloklara geri dağıtır; {blok: metin} döner.
 
@@ -1744,6 +1900,11 @@ class WhisperApp:
             kalan = [i for i in yedek_bloklar if i not in blok_ceviriler]
             if kalan and not self.is_cancelled:
                 self._yedek_yoldan_cevir(kalan, blok_metinleri, kaynak_dil, blok_ceviriler)
+
+            # Yedek yol da veremediyse üçüncü basamak: yerel model.
+            kalan = [i for i in yedek_bloklar if i not in blok_ceviriler]
+            if kalan and not self.is_cancelled:
+                self._yerelden_cevir(kalan, blok_metinleri, kaynak_dil, blok_ceviriler)
 
         return blok_ceviriler
 

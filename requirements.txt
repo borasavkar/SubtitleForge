@@ -110,6 +110,9 @@ torchmetrics==1.9.0
 torchvision==0.23.0
 tqdm==4.70.0
 transformers==5.15.0
+# Yerel çeviri (Opus-MT) tokenlayıcısı için gerekli.
+sentencepiece==0.2.2
+sacremoses==0.2.0
 typer==0.27.1
 typing_extensions==4.16.0
 tzdata==2026.3

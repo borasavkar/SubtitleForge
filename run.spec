@@ -72,6 +72,15 @@ datas = [('subs.ico', '.')]
 binaries = []
 hiddenimports = ['torch', 'numpy', 'deep_translator']
 
+# Yerel çeviri (üçüncü basamak) Opus-MT/Marian kullanıyor. transformers modülleri
+# tembel yüklüyor; PyInstaller'ın statik analizi bunları göremediği için elle
+# bildiriyoruz. Modelin KENDİSİ pakete girmiyor (~900 MB) -- ilk kullanımda
+# indirilip HF önbelleğine yazılıyor, modelleri_kopyala.ps1 taşınabilir pakete alıyor.
+hiddenimports += ['sentencepiece', 'sacremoses',
+                  'transformers.models.marian',
+                  'transformers.models.marian.modeling_marian',
+                  'transformers.models.marian.tokenization_marian']
+
 # NOT: ffmpeg BİLEREK paketlenmiyor.
 # Gömülü olsaydı her ffmpeg güncellemesi için exe'yi yeniden derlemek gerekirdi
 # ve pakete ~100-210 MB eklerdi. Bunun yerine program çalışma anında sistemdeki

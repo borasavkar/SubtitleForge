@@ -380,7 +380,24 @@ def test_tekrar_filtresi():
     kontrol("en uzun tekrar raporlandı", en_uzun == 90, str(en_uzun))
 
 
-def uctan_uca_uygulama(davranis, sansursuz=True):
+class SahteYerel:
+    """Testlerde gerçek Opus-MT modeli yüklenmesin diye: 900 MB indirme ve ~40 sn
+    yükleme, çevrimdışı test paketinde kabul edilemez. hazir=False iken üçüncü
+    basamak hiç çalışmamış gibi davranıyor."""
+    def __init__(self, hazir=False, donustur=None):
+        self._hazir = hazir
+        self.donustur = donustur or (lambda m: "YEREL:" + m)
+        self.cagrildi = 0
+
+    def hazirla(self, kaynak_dil):
+        return self._hazir
+
+    def cevir_liste(self, metinler, ilerleme=None):
+        self.cagrildi += 1
+        return [self.donustur(m) for m in metinler]
+
+
+def uctan_uca_uygulama(davranis, sansursuz=True, yerel=None):
     cev, oturum = cevirici_kur(davranis)
     cev.bekle = lambda s: None
 
@@ -391,6 +408,8 @@ def uctan_uca_uygulama(davranis, sansursuz=True):
     uygulama._ceviri_son_hata = None
     uygulama.uncensored = types.SimpleNamespace(get=lambda: sansursuz)
     uygulama._sure_metni = run.WhisperApp._sure_metni.__get__(uygulama)
+    # Yerel basamak testlerde varsayılan olarak KAPALI (gerçek model yüklenmesin).
+    uygulama._yerel = yerel if yerel is not None else SahteYerel(hazir=False)
     # GoogleCevirici'yi sabitliyoruz ki _bloklari_cevir yenisini kurmasın.
     gercek = run.GoogleCevirici
     run.GoogleCevirici = lambda **kw: cev
@@ -779,6 +798,40 @@ def test_yedek_yol_tekrar_deniyor():
             all(v >= 2 for v in gorulen.values()), str(gorulen))
 
 
+def test_yerel_basamak_devreye_giriyor():
+    print("\n[30] Üçüncü basamak: Google'ın iki yolu da kapalıyken yerel çeviri")
+    sahte = SahteYerel(hazir=True)
+    uygulama, cev, oturum, gercek = uctan_uca_uygulama(
+        lambda m, u, n: SahteYanit(429), yerel=sahte)
+    cev._fren_uygula = lambda s: None
+    cev.cevir_yedek = lambda metin, kaynak, hedef="tr": None      # /m de ölü
+    try:
+        bloklar = [{"start": i, "end": i + 1, "text": f"Line {i}."} for i in range(6)]
+        ceviriler = uygulama._bloklari_cevir(bloklar, "en")
+    finally:
+        run.GoogleCevirici = gercek
+
+    kontrol("birincil yol kapandı", cev.limit_asildi, "")
+    kontrol("yerel basamak çağrıldı", sahte.cagrildi > 0, str(sahte.cagrildi))
+    kontrol("6 satırın tamamı yerelden geldi", len(ceviriler) == 6, f"{len(ceviriler)}/6")
+    kontrol("metinler doğru eşleşti",
+            all(ceviriler.get(i) == f"YEREL:Line {i}." for i in range(6)), str(ceviriler))
+
+
+def test_yerel_yoksa_cokmuyor():
+    print("\n[31] Yerel model yoksa sessizce atlanıyor")
+    uygulama, cev, oturum, gercek = uctan_uca_uygulama(
+        lambda m, u, n: SahteYanit(429), yerel=SahteYerel(hazir=False))
+    cev._fren_uygula = lambda s: None
+    cev.cevir_yedek = lambda metin, kaynak, hedef="tr": None
+    try:
+        bloklar = [{"start": i, "end": i + 1, "text": f"Line {i}."} for i in range(6)]
+        ceviriler = uygulama._bloklari_cevir(bloklar, "en")
+    finally:
+        run.GoogleCevirici = gercek
+    kontrol("çeviri yok ama istisna fırlamadı", ceviriler == {}, str(ceviriler))
+
+
 for t in (test_satir_hizasi_korunuyor, test_eski_hata_yakalanirdi,
           test_bir_bozuk_satir_izole_ediliyor, test_429_freni,
           test_ag_hatasinda_bolunmuyor, test_noktalama_satirlari, test_gruplama,
@@ -790,7 +843,8 @@ for t in (test_satir_hizasi_korunuyor, test_eski_hata_yakalanirdi,
           test_devre_kesici, test_devre_kesici_gecici_dalgalanma,
           test_uctan_uca_429_yedek_yol, test_yedek_yol_onarimdan_sonra,
           test_yedek_yol_pes_ediyor, test_dagitilamayan_grup_yedek_yoldan,
-          test_yedek_yol_tekrar_deniyor):
+          test_yedek_yol_tekrar_deniyor,
+          test_yerel_basamak_devreye_giriyor, test_yerel_yoksa_cokmuyor):
     t()
 
 print("\n" + "=" * 60)
