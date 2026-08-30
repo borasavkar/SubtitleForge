@@ -547,7 +547,7 @@ class WhisperApp:
         self.root.title(f"SubtitleForge {surum_metni(kisa=True)}")
         # Pencere yeniden boyutlandırılabilir: alt sınır, ayar kutularının hepsinin
         # sığdığı yükseklik (bunun altında terminal alanı ezilir).
-        self.root.minsize(700, 890)
+        self.root.minsize(700, 760)   # terminal paneli expand ettiği için taban düşük tutuluyor
 
         # --- ERİŞİLEBİLİR MODERN FLUENT TASARIM ---
         bg_color = "#1e1e1e"        # Koyu antrasit zemin (Göz yormaz)
@@ -592,6 +592,7 @@ class WhisperApp:
 
         # --- İPTAL SİNYALİ VE DEĞİŞKENLER ---
         self.is_cancelled = False
+        self.kuyruk = []                # sırayla işlenecek video yolları
         self.pipeline = None            # whisperx FasterWhisperPipeline
         self.yuklu_model_anahtari = ""  # (model, hassasiyet, çekirdek) üçlüsü
         self.align_model = None
@@ -612,9 +613,22 @@ class WhisperApp:
         except Exception:
             ayarlar = {}
 
+        # Pencere boyutu artık hatırlanıyor. Varsayılan yükseklik ekrana göre
+        # hesaplanıyor: sabit 1055 px, kuyruk listesi eklendikten sonra terminal
+        # panelini eziyordu; küçük ekranlarda ise pencere alta taşıyordu.
         x = ayarlar.get("x", 100)
         y = ayarlar.get("y", 100)
-        self.root.geometry(f"700x1055+{x}+{y}")
+        try:
+            ekran_h = self.root.winfo_screenheight()
+        except Exception:
+            ekran_h = 1080
+        varsayilan_h = max(890, min(1180, ekran_h - 80))
+        g = int(ayarlar.get("g", 760))
+        h = int(ayarlar.get("h", varsayilan_h))
+        # Kayıtlı boyut bu ekrana sığmıyorsa (başka monitörde kaydedilmiş olabilir)
+        # ekrana göre kırpıyoruz, yoksa pencerenin altı görünmez oluyor.
+        h = max(600, min(h, ekran_h - 40))
+        self.root.geometry(f"{g}x{h}+{x}+{y}")
 
         self.root.report_callback_exception = self.tk_hata_yakalayici
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -681,9 +695,37 @@ class WhisperApp:
         frame_file = ttk.LabelFrame(root, text="1. Video Dosyası Seçimi", padding=15)
         frame_file.pack(fill="x", padx=15, pady=10)
 
-        self.entry_path = ttk.Entry(frame_file, textvariable=self.video_path, width=52)
+        satir_dosya = ttk.Frame(frame_file)
+        satir_dosya.pack(fill="x")
+        self.entry_path = ttk.Entry(satir_dosya, textvariable=self.video_path, width=52)
         self.entry_path.pack(side="left", padx=(0, 10))
-        ttk.Button(frame_file, text="Gözat 📂", command=self.select_file).pack(side="left")
+        ttk.Button(satir_dosya, text="Gözat 📂", command=self.select_file).pack(side="left")
+
+        # --- KUYRUK ---
+        # Kuyruk BOŞSA yukarıdaki tek dosya işlenir (eski davranış birebir korunur).
+        # Kuyrukta dosya varsa sırayla hepsi işlenir; model bir kez yüklenip
+        # tekrar kullanıldığı için ikinci videodan itibaren başlangıç maliyeti yok.
+        satir_kuyruk = ttk.Frame(frame_file)
+        satir_kuyruk.pack(fill="x", pady=(10, 0))
+        ttk.Button(satir_kuyruk, text="Kuyruğa Ekle ➕",
+                   command=self.kuyruga_ekle).pack(side="left")
+        ttk.Button(satir_kuyruk, text="Seçileni Çıkar ➖",
+                   command=self.kuyruktan_cikar).pack(side="left", padx=6)
+        ttk.Button(satir_kuyruk, text="Kuyruğu Temizle 🗑",
+                   command=self.kuyrugu_temizle).pack(side="left")
+        self.lbl_kuyruk = ttk.Label(satir_kuyruk, text="Kuyruk boş")
+        self.lbl_kuyruk.pack(side="right")
+
+        kutu = ttk.Frame(frame_file)
+        kutu.pack(fill="x", pady=(6, 0))
+        kaydirma = ttk.Scrollbar(kutu, orient="vertical")
+        self.liste_kuyruk = tk.Listbox(kutu, height=4, activestyle="none",
+                                       bg=input_bg, fg=fg_color, selectbackground="#0078D4",
+                                       highlightthickness=0, relief="flat",
+                                       yscrollcommand=kaydirma.set)
+        kaydirma.config(command=self.liste_kuyruk.yview)
+        self.liste_kuyruk.pack(side="left", fill="x", expand=True)
+        kaydirma.pack(side="right", fill="y")
 
         frame_settings = ttk.LabelFrame(root, text="2. İşlem Ayarları", padding=15)
         frame_settings.pack(fill="x", padx=15, pady=5)
@@ -788,7 +830,7 @@ class WhisperApp:
         frame_log = ttk.LabelFrame(root, text="İşlem Durumu (Terminal)", padding=10)
         frame_log.pack(fill="both", expand=True, padx=15, pady=(5, 15))
 
-        self.txt_log = scrolledtext.ScrolledText(frame_log, height=7, state='disabled', font=("Consolas", 10),
+        self.txt_log = scrolledtext.ScrolledText(frame_log, height=16, state='disabled', font=("Consolas", 10),
                                                  bg="#000000", fg="#E0E0E0", relief="flat", padx=10, pady=10)
         self.txt_log.pack(fill="both", expand=True)
 
@@ -830,6 +872,8 @@ class WhisperApp:
                 json.dump({
                     "x": self.root.winfo_x(),
                     "y": self.root.winfo_y(),
+                    "g": self.root.winfo_width(),
+                    "h": self.root.winfo_height(),
                     "model": self.model_size.get(),
                     "dil": self.source_lang.get(),
                     "islem": self.task_type.get(),
@@ -849,10 +893,69 @@ class WhisperApp:
         self.root.destroy()
         os._exit(0)
 
+    MEDYA_TURLERI = [("Medya Dosyaları",
+                      "*.mp4;*.mkv;*.avi;*.mov;*.mp3;*.wav;*.flac;*.ts;*.m4a;*.webm")]
+
+    # ------------------------------------------------------------------
+    # KUYRUK
+    # ------------------------------------------------------------------
+
+    def _kuyruk_yenile(self):
+        """Listeyi ve başlat düğmesinin yazısını kuyruğa göre günceller.
+        Yalnızca ana thread'den çağrılmalı (Tk kuralı)."""
+        self.liste_kuyruk.delete(0, tk.END)
+        for sira, yol in enumerate(self.kuyruk, 1):
+            self.liste_kuyruk.insert(tk.END, f"{sira}. {os.path.basename(yol)}")
+
+        adet = len(self.kuyruk)
+        self.lbl_kuyruk.config(text="Kuyruk boş" if not adet else f"Kuyrukta {adet} video")
+
+        # İşlem sürerken düğmenin yazısına dokunmuyoruz ("⏳ İşleniyor..." kalsın).
+        if self.btn_start["state"] != "disabled":
+            self.btn_start.config(
+                text="🚀 İŞLEMİ BAŞLAT" if not adet else f"🚀 KUYRUĞU BAŞLAT ({adet} video)")
+
+    def kuyruga_ekle(self):
+        """Bir veya birden fazla dosyayı kuyruğa ekler. Aynı dosya iki kez girmez."""
+        try:
+            yollar = filedialog.askopenfilenames(filetypes=self.MEDYA_TURLERI)
+        except Exception as e:
+            self.log(f"❌ Dosya Seçme Hatası: {e}")
+            return
+
+        eklenen = 0
+        for yol in yollar or ():
+            if yol and yol not in self.kuyruk:
+                self.kuyruk.append(yol)
+                eklenen += 1
+        if eklenen:
+            self.log(f"➕ Kuyruğa {eklenen} video eklendi (toplam {len(self.kuyruk)}).")
+        elif yollar:
+            self.log("ℹ️ Seçilen dosyalar zaten kuyrukta.")
+        self._kuyruk_yenile()
+
+    def kuyruktan_cikar(self):
+        secili = list(self.liste_kuyruk.curselection())
+        if not secili:
+            self.log("ℹ️ Önce kuyruktan çıkarılacak satırı seçin.")
+            return
+        for i in sorted(secili, reverse=True):     # sondan başa: indeksler kaymasın
+            if 0 <= i < len(self.kuyruk):
+                self.log(f"➖ Kuyruktan çıkarıldı: {os.path.basename(self.kuyruk[i])}")
+                del self.kuyruk[i]
+        self._kuyruk_yenile()
+
+    def kuyrugu_temizle(self):
+        if not self.kuyruk:
+            return
+        self.log(f"🗑 Kuyruk temizlendi ({len(self.kuyruk)} video çıkarıldı).")
+        self.kuyruk.clear()
+        self._kuyruk_yenile()
+
     def select_file(self):
         try:
             file_path = filedialog.askopenfilename(
-                filetypes=[("Medya Dosyaları", "*.mp4;*.mkv;*.avi;*.mov;*.mp3;*.wav;*.flac;*.ts;*.m4a;*.webm")])
+                filetypes=self.MEDYA_TURLERI)
             if file_path:
                 self.video_path.set(file_path)
                 self.log(f"Dosya seçildi: {os.path.basename(file_path)}")
@@ -1001,14 +1104,83 @@ class WhisperApp:
             self.log("\n⚠️ İPTAL SİNYALİ GÖNDERİLDİ! Mevcut işlem güvenlice sonlandırılıyor, lütfen bekleyin...\n")
 
     def start_thread(self):
-        if not self.video_path.get():
-            self.log("⚠️ HATA: Lütfen önce bir video dosyası seçin!")
+        # Kuyruk BOŞSA eski davranış: yukarıdaki tek dosya işlenir.
+        kuyruk = list(self.kuyruk)
+        if not kuyruk and not self.video_path.get():
+            self.log("⚠️ HATA: Lütfen bir video dosyası seçin ya da kuyruğa ekleyin!")
             return
 
         self.is_cancelled = False
         self.btn_start.config(state="disabled", text="⏳ İşleniyor...", bg="#555555", fg="white")
         self.btn_cancel.config(state="normal", text="🛑 İPTAL ET", bg="#D13438")
-        threading.Thread(target=self.run_process, daemon=True).start()
+
+        if kuyruk:
+            # Listeyi burada kopyaladık: işlem sürerken kullanıcı kuyruğu
+            # değiştirse bile çalışan tur etkilenmesin.
+            threading.Thread(target=self._kuyrugu_isle, args=(kuyruk,), daemon=True).start()
+        else:
+            threading.Thread(target=self.run_process, daemon=True).start()
+
+    def _kuyrugu_isle(self, kuyruk):
+        """Kuyruktaki videoları sırayla işler (worker thread).
+
+        Model önbelleğe alındığı için (bkz. _modeli_hazirla) ikinci videodan
+        itibaren model yükleme maliyeti yok; ayarlar değişmediği sürece tek
+        yükleme bütün kuyruğa yetiyor."""
+        toplam = len(kuyruk)
+        basarili, basarisiz = 0, []
+        t_kuyruk = time.time()
+
+        self.log("=" * 45)
+        self.log(f"📋 KUYRUK BAŞLADI — {toplam} video sırayla işlenecek.")
+
+        for sira, video in enumerate(kuyruk, 1):
+            if self.is_cancelled:
+                break
+            self.log("")
+            self.log("=" * 45)
+            self.log(f"📼 [{sira}/{toplam}] {os.path.basename(video)}")
+            self.log("=" * 45)
+            try:
+                if self.run_process(video_file=video, kuyruk_modu=True):
+                    basarili += 1
+                elif not self.is_cancelled:
+                    basarisiz.append(os.path.basename(video))
+            except Exception as e:
+                # Tek bir videonun patlaması kuyruğun geri kalanını düşürmemeli.
+                self._ceviri_son_hata = str(e)
+                self.log(f"❌ [{sira}/{toplam}] Bu video işlenemedi: {e}")
+                basarisiz.append(os.path.basename(video))
+
+        atlanan = toplam - basarili - len(basarisiz)
+        self.log("")
+        self.log("=" * 45)
+        if self.is_cancelled:
+            self.log(f"🛑 KUYRUK DURDURULDU — {basarili}/{toplam} video tamamlandı "
+                     f"({self._sure_metni(time.time() - t_kuyruk)}).")
+        else:
+            self.log(f"🏁 KUYRUK BİTTİ — {basarili}/{toplam} video başarılı "
+                     f"({self._sure_metni(time.time() - t_kuyruk)}).")
+        if basarisiz:
+            self.log(f"   ❌ Başarısız: {', '.join(basarisiz)}")
+        if atlanan > 0 and self.is_cancelled:
+            self.log(f"   ⏭️ İşlenmeyen: {atlanan} video")
+
+        def bitis():
+            self.btn_start.config(state="normal", bg="#0078D4", fg="white")
+            self.btn_cancel.config(state="disabled", text="🛑 İPTAL ET", bg="#D13438")
+            self._kuyruk_yenile()          # düğme yazısını geri koyar
+            if self.is_cancelled:
+                messagebox.showwarning("Kuyruk Durduruldu",
+                                       f"🛑 {basarili}/{toplam} video tamamlandı.")
+            elif basarisiz:
+                messagebox.showwarning("Kuyruk Bitti",
+                                       f"{basarili}/{toplam} video başarılı.\n\n"
+                                       f"Başarısız: {', '.join(basarisiz)}")
+            else:
+                messagebox.showinfo("Kuyruk Bitti",
+                                    f"🎉 {toplam} videonun tamamı işlendi!")
+        self.root.after(0, bitis)
 
     # ------------------------------------------------------------------
     # ZAMAN / METİN YARDIMCILARI
@@ -1328,17 +1500,44 @@ class WhisperApp:
         return temiz, atilan, en_uzun
 
     def _srt_yaz(self, yol, bloklar, metinler=None):
+        """SRT dosyasını ATOMİK yazar; yazılan satır varsa True döner.
+
+        Eskiden hedef dosya doğrudan "w" ile açılıyordu: açıldığı anda içerik
+        siliniyordu. Videodan hiç konuşma çıkmadığında (ya da yazma yarıda
+        kaldığında) kullanıcının aynı isimli ESKİ altyazısı sıfır bayta iniyordu.
+        Artık önce geçici dosyaya yazılıyor, ancak dolu bir içerik hazır olduğunda
+        os.replace ile yerine taşınıyor. Tek satır bile çıkmazsa hedefe hiç
+        dokunulmuyor ve False dönüyor."""
+        gecici = yol + ".yeni"
         sira = 0
-        with open(yol, "w", encoding="utf-8") as f:
-            for i, blok in enumerate(bloklar):
-                metin = metinler.get(i, blok["text"]) if metinler is not None else blok["text"]
-                metin = self._satir_kir(metin or "")
-                if not metin.strip():
-                    continue      # boş blok SRT'yi bozuyor, numarayı da harcamamalı
-                sira += 1
-                bas = self.format_timestamp(blok["start"])
-                son = self.format_timestamp(blok["end"])
-                f.write(f"{sira}\n{bas} --> {son}\n{metin}\n\n")
+        try:
+            with open(gecici, "w", encoding="utf-8") as f:
+                for i, blok in enumerate(bloklar):
+                    metin = metinler.get(i, blok["text"]) if metinler is not None else blok["text"]
+                    metin = self._satir_kir(metin or "")
+                    if not metin.strip():
+                        continue      # boş blok SRT'yi bozuyor, numarayı da harcamamalı
+                    sira += 1
+                    bas = self.format_timestamp(blok["start"])
+                    son = self.format_timestamp(blok["end"])
+                    f.write(f"{sira}\n{bas} --> {son}\n{metin}\n\n")
+        except Exception:
+            self._gecici_sil(gecici)
+            raise
+
+        if sira == 0:
+            self._gecici_sil(gecici)
+            return False
+
+        os.replace(gecici, yol)      # aynı diskte atomik: yarım dosya kalmaz
+        return True
+
+    @staticmethod
+    def _gecici_sil(yol):
+        try:
+            os.remove(yol)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # ÇEVİRİ YARDIMCILARI
@@ -2065,11 +2264,16 @@ class WhisperApp:
     # ANA İŞ AKIŞI
     # ------------------------------------------------------------------
 
-    def run_process(self):
+    def run_process(self, video_file=None, kuyruk_modu=False):
+        """Tek bir videoyu işler. İşlem başarılıysa True döner.
+
+        video_file verilmezse arayüzdeki tek dosya alanı kullanılır (eski davranış).
+        kuyruk_modu=True iken düğmeleri ve bitiş kutusunu bu metot yönetmez;
+        onları kuyruk döngüsü (_kuyrugu_isle) hepsi bittiğinde bir kez yapıyor."""
         islem_basarili = False
         baslangic_zamani = time.time()
         try:
-            video_file = self.video_path.get()
+            video_file = video_file or self.video_path.get()
             model_name = self.model_size.get()
             hassasiyet = self.compute_map.get(self.compute_type.get(), "int8")
             batch_size = self.batch_map.get(self.batch_mode.get(), 8)
@@ -2287,6 +2491,9 @@ class WhisperApp:
 
             if len(srt_blocks) == 0:
                 self.log("⚠️ UYARI: Hiç konuşma çıkarılamadı. Sessizlik Filtresi'ni 'Hassas' yapıp tekrar deneyin.")
+                self.log("   ⛔ Altyazı dosyası YAZILMADI; aynı isimli eski altyazınız varsa olduğu gibi duruyor.")
+                self.ilerleme(0, "Konuşma bulunamadı — dosya yazılmadı.")
+                return False
 
             if will_translate:
                 output_file_original = f"{base_path}{isim_eki}_{ceviri_kaynak_dili.upper()}.srt"
@@ -2295,7 +2502,10 @@ class WhisperApp:
                 output_file_original = f"{base_path}{isim_eki}.srt"
                 output_file_tr = None
 
-            self._srt_yaz(output_file_original, srt_blocks)
+            if not self._srt_yaz(output_file_original, srt_blocks):
+                self.log("⛔ Yazılabilir altyazı satırı çıkmadı; dosya oluşturulmadı "
+                         "(varsa eski altyazınıza dokunulmadı).")
+                return False
             self.log(f"💾 Orijinal Altyazı Kaydedildi:\n{os.path.basename(output_file_original)}")
 
             # --- 8) TÜRKÇE ÇEVİRİ ---
@@ -2349,16 +2559,20 @@ class WhisperApp:
             self.ilerleme(0, "Hata oluştu.")
 
         finally:
-            def bitis_islemleri():
-                self.btn_start.config(state="normal", text="🚀 İŞLEMİ BAŞLAT", bg="#0078D4", fg="white")
-                self.btn_cancel.config(state="disabled", text="🛑 İPTAL ET", bg="#D13438")
+            if not kuyruk_modu:
+                def bitis_islemleri():
+                    self.btn_start.config(state="normal", bg="#0078D4", fg="white")
+                    self.btn_cancel.config(state="disabled", text="🛑 İPTAL ET", bg="#D13438")
+                    self._kuyruk_yenile()      # düğme yazısını kuyruğa göre geri koyar
 
-                if islem_basarili:
-                    messagebox.showinfo("Başarılı", "🎉 Tüm altyazı ve çeviri işlemleri kusursuz tamamlandı!")
-                elif self.is_cancelled:
-                    messagebox.showwarning("İptal Edildi", "🛑 İşlem başarıyla durduruldu.")
+                    if islem_basarili:
+                        messagebox.showinfo("Başarılı", "🎉 Tüm altyazı ve çeviri işlemleri kusursuz tamamlandı!")
+                    elif self.is_cancelled:
+                        messagebox.showwarning("İptal Edildi", "🛑 İşlem başarıyla durduruldu.")
 
-            self.root.after(0, bitis_islemleri)
+                self.root.after(0, bitis_islemleri)
+
+        return islem_basarili
 
 
 if __name__ == "__main__":

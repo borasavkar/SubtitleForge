@@ -832,6 +832,117 @@ def test_yerel_yoksa_cokmuyor():
     kontrol("çeviri yok ama istisna fırlamadı", ceviriler == {}, str(ceviriler))
 
 
+def kuyruk_uygulamasi(davranis):
+    """_kuyrugu_isle'yi Tk olmadan koşturmak için asgari sahte uygulama."""
+    uyg = run.WhisperApp.__new__(run.WhisperApp)
+    uyg.is_cancelled = False
+    uyg.log = lambda m: None
+    uyg._sure_metni = run.WhisperApp._sure_metni.__get__(uyg)
+    uyg.root = types.SimpleNamespace(after=lambda ms, fn: None)   # arayüz adımı atlanır
+    uyg.run_process = davranis
+    return uyg
+
+
+def test_kuyruk_sirayla_isliyor():
+    print("\n[32] Kuyruk videoları sırayla işliyor")
+    islenen = []
+
+    def sahte(video_file=None, kuyruk_modu=False):
+        islenen.append((video_file, kuyruk_modu))
+        return True
+
+    uyg = kuyruk_uygulamasi(sahte)
+    uyg._kuyrugu_isle(["a.mp4", "b.mp4", "c.mp4"])
+
+    kontrol("üçü de sırayla işlendi",
+            [v for v, _ in islenen] == ["a.mp4", "b.mp4", "c.mp4"], str(islenen))
+    kontrol("hepsi kuyruk modunda çağrıldı",
+            all(k for _, k in islenen), str(islenen))
+
+
+def test_kuyruk_iptalde_duruyor():
+    print("\n[33] İptal kuyruğun geri kalanını da durduruyor")
+    islenen = []
+
+    def sahte(video_file=None, kuyruk_modu=False):
+        islenen.append(video_file)
+        if len(islenen) == 2:
+            uyg.is_cancelled = True        # ikinci videoda iptal
+        return not uyg.is_cancelled
+
+    uyg = kuyruk_uygulamasi(sahte)
+    uyg._kuyrugu_isle(["a.mp4", "b.mp4", "c.mp4", "d.mp4"])
+
+    kontrol("iptalden sonraki videolar işlenmedi",
+            islenen == ["a.mp4", "b.mp4"], str(islenen))
+
+
+def test_kuyruk_hatada_devam_ediyor():
+    print("\n[34] Bir video patlarsa kuyruk durmuyor")
+    islenen = []
+
+    def sahte(video_file=None, kuyruk_modu=False):
+        islenen.append(video_file)
+        if video_file == "bozuk.mp4":
+            raise RuntimeError("bu dosya açılamadı")
+        return True
+
+    uyg = kuyruk_uygulamasi(sahte)
+    uyg._kuyrugu_isle(["a.mp4", "bozuk.mp4", "c.mp4"])
+
+    kontrol("patlayan videodan sonrakiler de işlendi",
+            islenen == ["a.mp4", "bozuk.mp4", "c.mp4"], str(islenen))
+    kontrol("istisna dışarı sızmadı", True)
+
+
+def test_kuyruk_basarisizi_sayiyor():
+    print("\n[35] Başarısız videolar kuyruğu bitirmiyor, sayılıyor")
+    def sahte(video_file=None, kuyruk_modu=False):
+        return video_file != "olmaz.mp4"      # biri False döner
+
+    uyg = kuyruk_uygulamasi(sahte)
+    uyg._kuyrugu_isle(["a.mp4", "olmaz.mp4", "c.mp4"])
+    kontrol("kuyruk sonuna kadar gitti (istisna yok)", not uyg.is_cancelled)
+
+
+def test_bos_ciktida_eski_altyazi_korunuyor():
+    print("\n[36] Boş çıktı eski altyazıyı SİLMİYOR")
+    # GERÇEK RİSK: videodan hiç konuşma çıkmazsa _srt_yaz dosyayı "w" ile açıp
+    # anında sıfırlıyordu; kullanıcının aynı isimli eski altyazısı yok oluyordu.
+    uygulama = run.WhisperApp.__new__(run.WhisperApp)
+    uygulama._satir_kir = run.WhisperApp._satir_kir.__get__(uygulama)
+    uygulama.format_timestamp = run.WhisperApp.format_timestamp.__get__(uygulama)
+    uygulama._gecici_sil = run.WhisperApp._gecici_sil
+
+    with tempfile.TemporaryDirectory() as d:
+        yol = os.path.join(d, "film.srt")
+        eski = "1\n00:00:01,000 --> 00:00:02,000\nDeğerli eski altyazı\n\n"
+        open(yol, "w", encoding="utf-8").write(eski)
+
+        sonuc = uygulama._srt_yaz(yol, [])                    # hiç blok yok
+        kontrol("blok yokken False döndü", sonuc is False, str(sonuc))
+        kontrol("eski altyazı OLDUĞU GİBİ duruyor",
+                open(yol, encoding="utf-8").read() == eski, "dosya değişmiş!")
+
+        # Sadece boş metinli bloklar da dosyayı sıfırlamamalı
+        bos_bloklar = [{"start": 0.0, "end": 1.0, "text": "   "},
+                       {"start": 1.0, "end": 2.0, "text": ""}]
+        sonuc2 = uygulama._srt_yaz(yol, bos_bloklar)
+        kontrol("yalnızca boş bloklarda da False döndü", sonuc2 is False, str(sonuc2))
+        kontrol("eski altyazı hâlâ yerinde",
+                open(yol, encoding="utf-8").read() == eski, "dosya değişmiş!")
+
+        kontrol("geçici dosya artığı bırakılmadı",
+                not os.path.exists(yol + ".yeni"), "film.srt.yeni kalmış")
+
+        # Dolu içerik normal şekilde yazılmalı (üzerine yazma çalışıyor)
+        sonuc3 = uygulama._srt_yaz(yol, [{"start": 0.0, "end": 1.0, "text": "Yeni satır"}])
+        icerik = open(yol, encoding="utf-8").read()
+        kontrol("dolu içerik yazıldı, True döndü", sonuc3 is True, str(sonuc3))
+        kontrol("yeni içerik dosyada", "Yeni satır" in icerik, icerik[:40])
+        kontrol("eski içerik değiştirildi", "Değerli eski" not in icerik)
+
+
 for t in (test_satir_hizasi_korunuyor, test_eski_hata_yakalanirdi,
           test_bir_bozuk_satir_izole_ediliyor, test_429_freni,
           test_ag_hatasinda_bolunmuyor, test_noktalama_satirlari, test_gruplama,
@@ -844,7 +955,10 @@ for t in (test_satir_hizasi_korunuyor, test_eski_hata_yakalanirdi,
           test_uctan_uca_429_yedek_yol, test_yedek_yol_onarimdan_sonra,
           test_yedek_yol_pes_ediyor, test_dagitilamayan_grup_yedek_yoldan,
           test_yedek_yol_tekrar_deniyor,
-          test_yerel_basamak_devreye_giriyor, test_yerel_yoksa_cokmuyor):
+          test_yerel_basamak_devreye_giriyor, test_yerel_yoksa_cokmuyor,
+          test_kuyruk_sirayla_isliyor, test_kuyruk_iptalde_duruyor,
+          test_kuyruk_hatada_devam_ediyor, test_kuyruk_basarisizi_sayiyor,
+          test_bos_ciktida_eski_altyazi_korunuyor):
     t()
 
 print("\n" + "=" * 60)
