@@ -699,7 +699,8 @@ class WhisperApp:
         satir_dosya.pack(fill="x")
         self.entry_path = ttk.Entry(satir_dosya, textvariable=self.video_path, width=52)
         self.entry_path.pack(side="left", padx=(0, 10))
-        ttk.Button(satir_dosya, text="Gözat 📂", command=self.select_file).pack(side="left")
+        btn_gozat = ttk.Button(satir_dosya, text="Gözat 📂", command=self.select_file)
+        btn_gozat.pack(side="left")
 
         # --- KUYRUK ---
         # Kuyruk BOŞSA yukarıdaki tek dosya işlenir (eski davranış birebir korunur).
@@ -707,12 +708,15 @@ class WhisperApp:
         # tekrar kullanıldığı için ikinci videodan itibaren başlangıç maliyeti yok.
         satir_kuyruk = ttk.Frame(frame_file)
         satir_kuyruk.pack(fill="x", pady=(10, 0))
-        ttk.Button(satir_kuyruk, text="Kuyruğa Ekle ➕",
-                   command=self.kuyruga_ekle).pack(side="left")
-        ttk.Button(satir_kuyruk, text="Seçileni Çıkar ➖",
-                   command=self.kuyruktan_cikar).pack(side="left", padx=6)
-        ttk.Button(satir_kuyruk, text="Kuyruğu Temizle 🗑",
-                   command=self.kuyrugu_temizle).pack(side="left")
+        self.btn_kuyruk_ekle = ttk.Button(satir_kuyruk, text="Kuyruğa Ekle ➕",
+                                          command=self.kuyruga_ekle)
+        self.btn_kuyruk_ekle.pack(side="left")
+        self.btn_kuyruk_cikar = ttk.Button(satir_kuyruk, text="Seçileni Çıkar ➖",
+                                           command=self.kuyruktan_cikar)
+        self.btn_kuyruk_cikar.pack(side="left", padx=6)
+        self.btn_kuyruk_temizle = ttk.Button(satir_kuyruk, text="Kuyruğu Temizle 🗑",
+                                             command=self.kuyrugu_temizle)
+        self.btn_kuyruk_temizle.pack(side="left")
         self.lbl_kuyruk = ttk.Label(satir_kuyruk, text="Kuyruk boş")
         self.lbl_kuyruk.pack(side="right")
 
@@ -775,23 +779,40 @@ class WhisperApp:
         frame_ffmpeg.grid(row=8, column=1, padx=10, pady=6, sticky="w")
         self.entry_ffmpeg = ttk.Entry(frame_ffmpeg, textvariable=self.ffmpeg_path, width=26)
         self.entry_ffmpeg.pack(side="left", padx=(0, 5))
-        ttk.Button(frame_ffmpeg, text="Gözat 📂", width=9,
-                   command=self.select_ffmpeg).pack(side="left", padx=(0, 4))
-        ttk.Button(frame_ffmpeg, text="Otomatik", width=9,
-                   command=self.ffmpeg_otomatik).pack(side="left")
+        btn_ff_gozat = ttk.Button(frame_ffmpeg, text="Gözat 📂", width=9,
+                                  command=self.select_ffmpeg)
+        btn_ff_gozat.pack(side="left", padx=(0, 4))
+        btn_ff_oto = ttk.Button(frame_ffmpeg, text="Otomatik", width=9,
+                                command=self.ffmpeg_otomatik)
+        btn_ff_oto.pack(side="left")
 
         self.lbl_ffmpeg = tk.Label(frame_settings, text="FFmpeg aranıyor...", justify="left",
                                    bg=bg_color, fg="#aaaaaa", font=("Segoe UI", 9), anchor="w")
         self.lbl_ffmpeg.grid(row=9, column=0, columnspan=2, sticky="w", padx=5)
 
-        ttk.Checkbutton(frame_settings, text=" 🎯 Kelime Zamanlaması (WhisperX Hizalama - Önerilen)",
-                        variable=self.do_align).grid(row=10, column=0, columnspan=2, sticky="w", padx=5, pady=(12, 2))
+        chk_align = ttk.Checkbutton(frame_settings, text=" 🎯 Kelime Zamanlaması (WhisperX Hizalama - Önerilen)",
+                                    variable=self.do_align)
+        chk_align.grid(row=10, column=0, columnspan=2, sticky="w", padx=5, pady=(12, 2))
 
-        ttk.Checkbutton(frame_settings, text=" 🇹🇷 İşlem Bitince Ekstra Türkçe (.srt) Dosyası Üret",
-                        variable=self.auto_translate_tr).grid(row=11, column=0, columnspan=2, sticky="w", padx=5, pady=(2, 2))
+        chk_tr = ttk.Checkbutton(frame_settings, text=" 🇹🇷 İşlem Bitince Ekstra Türkçe (.srt) Dosyası Üret",
+                                 variable=self.auto_translate_tr)
+        chk_tr.grid(row=11, column=0, columnspan=2, sticky="w", padx=5, pady=(2, 2))
 
-        ttk.Checkbutton(frame_settings, text=" 🔞 Sansürsüz Mod (küfür/argo yumuşatılmadan yazılsın)",
-                        variable=self.uncensored).grid(row=12, column=0, columnspan=2, sticky="w", padx=5, pady=(2, 10))
+        chk_sansur = ttk.Checkbutton(frame_settings, text=" 🔞 Sansürsüz Mod (küfür/argo yumuşatılmadan yazılsın)",
+                                     variable=self.uncensored)
+        chk_sansur.grid(row=12, column=0, columnspan=2, sticky="w", padx=5, pady=(2, 10))
+
+        # İşlem sürerken kilitlenecek kontroller. Kuyruk ortasında ayar
+        # değiştirmek kalan videoları sessizce farklı işliyordu; kuyruğa ekleme
+        # de çalışan tura yansımıyordu (liste işlem başında kopyalanıyor).
+        self._kilitlenecek = [
+            self.entry_path, btn_gozat,
+            self.btn_kuyruk_ekle, self.btn_kuyruk_cikar, self.btn_kuyruk_temizle,
+            combo_model, combo_lang, combo_task, combo_compute,
+            combo_batch, combo_threads, combo_vad, combo_style,
+            self.entry_ffmpeg, btn_ff_gozat, btn_ff_oto,
+            chk_align, chk_tr, chk_sansur,
+        ]
 
         tk.Label(frame_settings,
                  text="💡 İPUCU: Ekran kartı kullanılmıyor, tüm iş işlemcide dönüyor. Filmler için en dengeli ayar\n"
@@ -1103,6 +1124,54 @@ class WhisperApp:
             self.btn_cancel.config(state="disabled", text="⏳ Durduruluyor...", bg="#7A7A7A")
             self.log("\n⚠️ İPTAL SİNYALİ GÖNDERİLDİ! Mevcut işlem güvenlice sonlandırılıyor, lütfen bekleyin...\n")
 
+    def _arayuzu_kilitle(self, kilitli):
+        """İşlem sürerken ayarları ve kuyruk düğmelerini kilitler.
+
+        Kuyruk ortasında model/dil değiştirilirse kalan videolar sessizce farklı
+        ayarla işleniyordu (ayarlar her videonun başında yeniden okunuyor).
+        Kuyruğa ekleme/çıkarma ise çalışan tura hiç yansımıyordu, çünkü liste
+        işlem başında kopyalanıyor -- kullanıcı eklediği videoların işleneceğini
+        sanıyordu. İkisi de sessiz ve yanıltıcıydı."""
+        for w in getattr(self, "_kilitlenecek", ()):
+            try:
+                if kilitli:
+                    w.config(state="disabled")
+                else:
+                    # Combobox "normal" olursa elle yazılabilir hale gelir.
+                    w.config(state="readonly" if isinstance(w, ttk.Combobox) else "normal")
+            except Exception:
+                pass
+
+    def _on_kontrol(self):
+        """İşlem/kuyruk başlamadan ÖNCE bir kez yapılan kontroller.
+
+        Eskiden bunlar her video için ayrı yapılıyordu: FFmpeg yoksa 20 videoluk
+        kuyrukta 20 modal hata kutusu üst üste açılıyor, kullanıcı hepsini tek tek
+        kapatmak zorunda kalıyordu. Artık en baştan tek kutu."""
+        if not self._ffmpeg_coz():
+            elle = (self.ffmpeg_path.get() or "").strip()
+            self.log("❌ HATA: FFmpeg bulunamadı. Ses FFmpeg ile çözülüyor, onsuz devam edilemez.")
+            if elle:
+                self.log(f"   Ayarlardaki yol geçersiz: {elle}")
+            else:
+                self.log("   Kurulum:  winget install Gyan.FFmpeg")
+            messagebox.showerror(
+                "FFmpeg Bulunamadı",
+                "Bu program sesi çözmek için FFmpeg kullanıyor ve sisteminizde bulunamadı.\n\n"
+                "Çözüm 1: FFmpeg kurun\n"
+                "    winget install Gyan.FFmpeg\n\n"
+                "Çözüm 2: Zaten kuruluysa 'FFmpeg Yolu' satırındaki 'Gözat' düğmesiyle\n"
+                "ffmpeg.exe dosyasını elle seçin.")
+            return False
+
+        if ("distil" in self.model_size.get().lower()
+                and self.lang_map.get(self.source_lang.get(), "auto") not in ("en", "auto")):
+            self.log("⚠️ KRİTİK UYARI: 'distil' modelleri sadece İNGİLİZCE için eğitilmiştir!")
+            messagebox.showerror("Model Uygunsuz",
+                                 "'distil-large-v3' modeli sadece İngilizce destekler.")
+            return False
+        return True
+
     def start_thread(self):
         # Kuyruk BOŞSA eski davranış: yukarıdaki tek dosya işlenir.
         kuyruk = list(self.kuyruk)
@@ -1110,13 +1179,18 @@ class WhisperApp:
             self.log("⚠️ HATA: Lütfen bir video dosyası seçin ya da kuyruğa ekleyin!")
             return
 
+        # Ön kontroller tek seferde; geçemezse hiç başlamıyoruz.
+        if not self._on_kontrol():
+            return
+
         self.is_cancelled = False
+        self._arayuzu_kilitle(True)
         self.btn_start.config(state="disabled", text="⏳ İşleniyor...", bg="#555555", fg="white")
         self.btn_cancel.config(state="normal", text="🛑 İPTAL ET", bg="#D13438")
 
         if kuyruk:
-            # Listeyi burada kopyaladık: işlem sürerken kullanıcı kuyruğu
-            # değiştirse bile çalışan tur etkilenmesin.
+            # Liste kopyalanıyor: kuyruk düğmeleri işlem boyunca kilitli olsa da
+            # (bkz. _arayuzu_kilitle) çalışan tur kendi anlık görüntüsüyle ilerlesin.
             threading.Thread(target=self._kuyrugu_isle, args=(kuyruk,), daemon=True).start()
         else:
             threading.Thread(target=self.run_process, daemon=True).start()
@@ -1167,6 +1241,7 @@ class WhisperApp:
             self.log(f"   ⏭️ İşlenmeyen: {atlanan} video")
 
         def bitis():
+            self._arayuzu_kilitle(False)
             self.btn_start.config(state="normal", bg="#0078D4", fg="white")
             self.btn_cancel.config(state="disabled", text="🛑 İPTAL ET", bg="#D13438")
             self._kuyruk_yenile()          # düğme yazısını geri koyar
@@ -2289,7 +2364,7 @@ class WhisperApp:
 
             if not os.path.isfile(video_file):
                 self.log("❌ HATA: Seçilen dosya bulunamadı.")
-                return
+                return False
 
             ffmpeg_yolu = self._ffmpeg_coz()
             if not ffmpeg_yolu:
@@ -2304,24 +2379,30 @@ class WhisperApp:
                     self.log("        ya da: scoop install ffmpeg")
                     self.log("   Kuruluysa 'Gözat' ile ffmpeg.exe dosyasını elle seçebilirsiniz.")
 
-                def _ffmpeg_uyarisi():
-                    messagebox.showerror(
-                        "FFmpeg Bulunamadı",
-                        "Bu program sesi çözmek için FFmpeg kullanıyor ve sisteminizde bulunamadı.\n\n"
-                        "Çözüm 1: FFmpeg kurun\n"
-                        "    winget install Gyan.FFmpeg\n\n"
-                        "Çözüm 2: Zaten kuruluysa 'FFmpeg Yolu' satırındaki 'Gözat' düğmesiyle\n"
-                        "ffmpeg.exe dosyasını elle seçin.")
-                self.root.after(0, _ffmpeg_uyarisi)
-                return
+                # Kutu yalnızca tek dosya akışında: kuyrukta her video için bir
+                # kutu açmak N tane modal pencere yığıyordu. Ön kontrol (_on_kontrol)
+                # zaten baştan yakalıyor; buradaki yol savunma amaçlı duruyor.
+                if not kuyruk_modu:
+                    def _ffmpeg_uyarisi():
+                        messagebox.showerror(
+                            "FFmpeg Bulunamadı",
+                            "Bu program sesi çözmek için FFmpeg kullanıyor ve sisteminizde bulunamadı.\n\n"
+                            "Çözüm 1: FFmpeg kurun\n"
+                            "    winget install Gyan.FFmpeg\n\n"
+                            "Çözüm 2: Zaten kuruluysa 'FFmpeg Yolu' satırındaki 'Gözat' düğmesiyle\n"
+                            "ffmpeg.exe dosyasını elle seçin.")
+                    self.root.after(0, _ffmpeg_uyarisi)
+                return False
 
             if "distil" in model_name.lower() and lang_code not in ("en", "auto"):
                 self.log("⚠️ KRİTİK UYARI: 'distil' modelleri sadece İNGİLİZCE için eğitilmiştir!")
 
-                def _distil_uyarisi():
-                    messagebox.showerror("Model Uygunsuz", "'distil-large-v3' modeli sadece İngilizce destekler.")
-                self.root.after(0, _distil_uyarisi)
-                return
+                if not kuyruk_modu:
+                    def _distil_uyarisi():
+                        messagebox.showerror("Model Uygunsuz",
+                                             "'distil-large-v3' modeli sadece İngilizce destekler.")
+                    self.root.after(0, _distil_uyarisi)
+                return False
 
             self.log("=" * 45)
             self._kutuphaneleri_yukle()
@@ -2561,6 +2642,7 @@ class WhisperApp:
         finally:
             if not kuyruk_modu:
                 def bitis_islemleri():
+                    self._arayuzu_kilitle(False)
                     self.btn_start.config(state="normal", bg="#0078D4", fg="white")
                     self.btn_cancel.config(state="disabled", text="🛑 İPTAL ET", bg="#D13438")
                     self._kuyruk_yenile()      # düğme yazısını kuyruğa göre geri koyar

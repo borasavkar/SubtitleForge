@@ -24,6 +24,11 @@ tk.messagebox = sys.modules["tkinter.messagebox"]
 for isim in ("StringVar", "BooleanVar", "Frame", "Label", "Button", "Tk"):
     setattr(tk, isim, type(isim, (), {}))
 tk.END = "end"
+# _arayuzu_kilitle "isinstance(w, ttk.Combobox)" kontrolü yapıyor; sahte ttk
+# modülünde bu sınıflar olmazsa AttributeError sessizce yutulur ve test yanıltır.
+for isim in ("Combobox", "Entry", "Button", "Checkbutton", "Frame",
+             "Label", "LabelFrame", "Scrollbar", "Progressbar"):
+    setattr(tk.ttk, isim, type(isim, (), {}))
 
 # run.py depo kökünde duruyor.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -943,6 +948,37 @@ def test_bos_ciktida_eski_altyazi_korunuyor():
         kontrol("eski içerik değiştirildi", "Değerli eski" not in icerik)
 
 
+def test_arayuz_kilidi():
+    print("\n[37] İşlem sırasında ayarlar kilitleniyor, sonra doğru açılıyor")
+
+    class SahteEntry:
+        def __init__(self): self.durum = "normal"
+        def config(self, **kw): self.durum = kw.get("state", self.durum)
+
+    class SahteCombo(run.ttk.Combobox):
+        def __init__(self): self.durum = "readonly"
+        def config(self, **kw): self.durum = kw.get("state", self.durum)
+
+    uygulama = run.WhisperApp.__new__(run.WhisperApp)
+    entry, combo = SahteEntry(), SahteCombo()
+    uygulama._kilitlenecek = [entry, combo]
+
+    uygulama._arayuzu_kilitle(True)
+    kontrol("işlem sırasında ayarlar kilitlendi",
+            entry.durum == "disabled" and combo.durum == "disabled",
+            f"{entry.durum} / {combo.durum}")
+
+    uygulama._arayuzu_kilitle(False)
+    kontrol("normal alan 'normal' oldu", entry.durum == "normal", entry.durum)
+    kontrol("Combobox 'readonly' oldu (elle yazılabilir olmadı)",
+            combo.durum == "readonly", combo.durum)
+
+    # Liste hiç kurulmamışsa (eski ayar dosyası, kısmi init) çökmemeli
+    bos = run.WhisperApp.__new__(run.WhisperApp)
+    bos._arayuzu_kilitle(True)
+    kontrol("_kilitlenecek yoksa çökmüyor", True)
+
+
 for t in (test_satir_hizasi_korunuyor, test_eski_hata_yakalanirdi,
           test_bir_bozuk_satir_izole_ediliyor, test_429_freni,
           test_ag_hatasinda_bolunmuyor, test_noktalama_satirlari, test_gruplama,
@@ -958,7 +994,7 @@ for t in (test_satir_hizasi_korunuyor, test_eski_hata_yakalanirdi,
           test_yerel_basamak_devreye_giriyor, test_yerel_yoksa_cokmuyor,
           test_kuyruk_sirayla_isliyor, test_kuyruk_iptalde_duruyor,
           test_kuyruk_hatada_devam_ediyor, test_kuyruk_basarisizi_sayiyor,
-          test_bos_ciktida_eski_altyazi_korunuyor):
+          test_bos_ciktida_eski_altyazi_korunuyor, test_arayuz_kilidi):
     t()
 
 print("\n" + "=" * 60)
