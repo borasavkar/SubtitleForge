@@ -60,8 +60,8 @@ The version number lives in a single place: `surum.py`. Bump `SURUM` there and e
 
 Every build stamps itself so you can always tell whether the executable you are holding is current:
 
-- **Window title** — `SubtitleForge v1.1.0`
-- **First line of the log panel** — `SubtitleForge v1.1.0 · 2026-08-27 20:47 derlemesi · b8472c8` (build timestamp and the git commit it was built from). Running from source shows `kaynaktan çalışıyor` instead.
+- **Window title** — `SubtitleForge v1.2.0`
+- **First line of the log panel** — `SubtitleForge v1.2.0 · 2026-08-28 16:40 derlemesi · 3c70699` (build timestamp and the git commit it was built from). Running from source shows `kaynaktan çalışıyor` instead.
 - **Windows file properties** — right-click `SubtitleForge.exe` → Properties → Details shows File version and Product version.
 - **Crash reports** — `HATA_RAPORU.txt` starts with the version line, so a shared report identifies its build.
 

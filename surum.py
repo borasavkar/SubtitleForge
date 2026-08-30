@@ -10,4 +10,4 @@ Sürüm yükseltirken yalnızca burayı değiştirin.
   PATCH -> hata düzeltmesi, MINOR -> yeni özellik, MAJOR -> geriye uyumsuz değişiklik
 """
 
-SURUM = "1.1.0"
+SURUM = "1.2.0"
